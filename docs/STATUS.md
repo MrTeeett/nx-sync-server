@@ -15,6 +15,8 @@ Implemented paths:
 - Signature-pinned offline release bundles, target/expiry/sequence/hash checks,
   same-schema snapshots and recovery preserving the live database.
 - Full static Linux cross-build matrix, binary/source archives and licenses.
+- GitHub Actions workflow for guarded tests/builds, artifacts and a rolling
+  unsigned dev prerelease after successful main builds.
 
 Remaining acceptance work:
 
@@ -25,7 +27,7 @@ Remaining acceptance work:
   with firewalld/UFW, IPv6, external ingress and existing nginx/services.
 - Runtime testing on non-amd64 processors. Cross-compilation proves compilation
   and ELF target properties; it does not prove hardware/runtime acceptance.
-- Project publishing identity/feed, key rotation policy, automated fetching,
+- Stable signed publishing identity/feed, key rotation policy, automated fetching,
   comprehensive signed metadata (TUF), schema migrations and old-release cleanup.
 - Reinstallation over retained data, automatic root maintenance jobs surviving
   SSH termination, and physical disk/metadata/history budgets and measurements.

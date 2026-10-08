@@ -6,6 +6,7 @@ case "$mode" in all|check|test|build|vet|race|deps|cross) ;; *) echo 'unknown ch
 if [[ "${2:-}" != --inside ]]; then
   exec systemd-run --user --wait --pipe --collect \
     -p MemoryMax=4G -p MemoryHigh=3G -p MemorySwapMax=0 -p TasksMax=128 \
+    --setenv="PATH=$PATH" --setenv="NX_VERSION=${NX_VERSION:-0.1.0-dev}" \
     --working-directory="$repo_dir" \
     /bin/bash "$repo_dir/scripts/check" "$mode" --inside
 fi
@@ -84,6 +85,7 @@ case "$mode" in
     cp -R -- cmd internal scripts packaging docs third_party \
       README.md LICENSE Makefile CONTRIBUTING.md SECURITY.md CHANGELOG.md \
       THIRD_PARTY_NOTICES.md go.mod go.sum .gitignore "$repo_dir/dist/source/"
+    if [[ -d .github ]]; then cp -R -- .github "$repo_dir/dist/source/"; fi
     go mod vendor -o "$repo_dir/dist/source/vendor"
     tar -C "$repo_dir/dist" -czf "$repo_dir/dist/nx-sync-server-source.tar.gz" source
     (cd -- dist; sha256sum nx-sync-server-*.tar.gz > SHA256SUMS)

@@ -6,7 +6,7 @@ including installation over SSH. Content encryption, profile owner keys, and
 settings merging remain on client devices.
 
 This is an initial protocol implementation. Android/Desktop UI integration,
-device invitations, a public release channel, and PostgreSQL support require
+device invitations, a stable update channel, and PostgreSQL support require
 further implementation and validation. The HTTP API does not expose system
 management with root privileges.
 
@@ -49,6 +49,24 @@ All compilers and child processes run in one cgroup with a hard `MemoryMax=4G`
 limit, `MemorySwapMax=0`, one build job, and one test worker. The script verifies
 the actual values in `/sys/fs/cgroup` **before** running Go. If the limit is not
 active, the build stops. `make -j` does not increase parallelism.
+
+## Development snapshots
+
+GitHub Actions runs module verification, tests, go vet, race detector tests,
+and the full Linux build matrix on branch pushes, pull requests, and manual
+runs. Builds use the same verified 4 GiB cgroup limit and one worker as local
+builds. Each run uploads binary archives, a source archive with vendored
+dependencies, and `SHA256SUMS` as an artifact retained for 14 days.
+
+Successful builds from `main` update the rolling
+[dev prerelease](https://github.com/MrTeeett/nx-sync-server/releases/tag/dev).
+Versions use `0.1.0-dev.<commit>`; the release notes link to the commit and
+workflow run. Builds from other branches and pull requests publish artifacts
+without changing the dev release.
+
+These snapshots are unsigned development archives. The signed `install` and
+`update` workflow requires stable release bundles from a trusted publisher.
+The dev tag moves to the latest successfully published main commit.
 
 ## Installation platforms
 

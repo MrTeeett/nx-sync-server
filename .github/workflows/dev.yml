@@ -1,0 +1,113 @@
+name: Tests and development builds
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nx-sync-server-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  checks-and-build:
+    name: Test and build all Linux targets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      NX_VERSION: 0.1.0-dev.${{ github.sha }}
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        id: go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.x'
+          check-latest: true
+          cache: false
+
+      - name: Restore module and compiler caches
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .cache/mod
+            .cache/build
+          key: linux-go-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ hashFiles('cmd/**/*.go', 'internal/**/*.go', 'scripts/check', 'Makefile', 'packaging/targets.txt') }}
+          restore-keys: |
+            linux-go-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}-
+
+      - name: Start the systemd user manager for guarded builds
+        run: |
+          nx_runner_user="$(id -un)"
+          nx_runner_uid="$(id -u)"
+          sudo loginctl enable-linger "$nx_runner_user"
+          sudo systemctl start "user@${nx_runner_uid}.service"
+          nx_runtime_dir="/run/user/${nx_runner_uid}"
+          test -S "$nx_runtime_dir/bus"
+          printf 'XDG_RUNTIME_DIR=%s\nDBUS_SESSION_BUS_ADDRESS=unix:path=%s/bus\n' \
+            "$nx_runtime_dir" "$nx_runtime_dir" >> "$GITHUB_ENV"
+
+      - name: Verify modules, run tests and go vet
+        run: make check
+
+      - name: Run race detector tests
+        run: make race
+
+      - name: Build every Linux target and the source archive
+        run: make build all
+
+      - name: Verify archive checksums
+        working-directory: dist
+        run: sha256sum --check SHA256SUMS
+
+      - name: Upload development archives
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nx-sync-server-${{ github.sha }}
+          path: |
+            dist/nx-sync-server-*.tar.gz
+            dist/SHA256SUMS
+          compression-level: 0
+          retention-days: 14
+          if-no-files-found: error
+
+  publish-dev:
+    name: Update the dev prerelease
+    needs: checks-and-build
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+    concurrency:
+      group: nx-sync-server-dev-release
+      cancel-in-progress: false
+    steps:
+      - name: Check out the release helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download verified build archives
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: nx-sync-server-${{ github.sha }}
+          path: dist
+
+      - name: Publish the latest main snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/publish-dev

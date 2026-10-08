@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+set -euo pipefail
+: "${GITHUB_REPOSITORY:?repository is required}"
+: "${GITHUB_SHA:?commit is required}"
+: "${GITHUB_RUN_ID:?workflow run is required}"
+: "${GH_TOKEN:?GitHub authentication is required}"
+if [[ ! "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+  echo 'invalid commit SHA' >&2; exit 64
+fi
+
+repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd -- "$repo_dir/dist"
+sha256sum --check SHA256SUMS
+shopt -s nullglob
+assets=(nx-sync-server-linux-*.tar.gz nx-sync-server-source.tar.gz SHA256SUMS)
+for asset in "${assets[@]}"; do
+  [[ -f "$asset" ]] || { echo "missing release asset: $asset" >&2; exit 66; }
+done
+expected_targets="$(awk '!/^#/ && NF { count++ } END { print count }' "$repo_dir/packaging/targets.txt")"
+if (( ${#assets[@]} != expected_targets + 2 )); then
+  echo 'release does not contain the complete Linux matrix and source archive' >&2; exit 66
+fi
+
+# Do not replace a newer snapshot when an older workflow is rerun or finishes late.
+main_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
+if [[ "$main_sha" != "$GITHUB_SHA" ]]; then
+  echo 'main has advanced; skipping publication of this older snapshot'
+  exit 0
+fi
+
+notes_file="$(mktemp)"
+trap 'rm -f -- "$notes_file"' EXIT
+cat > "$notes_file" <<EOF
+Development snapshot from commit $GITHUB_SHA.
+
+Version: 0.1.0-dev.$GITHUB_SHA
+Workflow: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+
+Includes both binaries for all Linux targets, corresponding vendored source,
+documentation, licenses, and SHA-256 checksums. Module verification, tests,
+go vet, and race detector tests passed before this build was published.
+
+This rolling prerelease is updated after successful main builds. These are
+unsigned development archives; the signed install/update workflow requires
+stable release bundles signed by a trusted publisher.
+EOF
+
+title="Development build (${GITHUB_SHA:0:12})"
+if prerelease="$(gh release view dev --repo "$GITHUB_REPOSITORY" --json isPrerelease --jq '.isPrerelease')"; then
+  if [[ "$prerelease" != true ]]; then
+    echo 'dev already belongs to a stable release; refusing to replace it' >&2
+    exit 78
+  fi
+  gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/dev" \
+    -f "sha=$GITHUB_SHA" -F force=true > /dev/null
+  gh release upload dev "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+  gh release edit dev --repo "$GITHUB_REPOSITORY" --prerelease --latest=false \
+    --title "$title" --notes-file "$notes_file"
+else
+  gh release create dev "${assets[@]}" --repo "$GITHUB_REPOSITORY" \
+    --target "$GITHUB_SHA" --prerelease --latest=false \
+    --title "$title" --notes-file "$notes_file"
+fi
