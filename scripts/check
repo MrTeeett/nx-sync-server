@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+set -euo pipefail
+repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+mode="${1:-check}"
+case "$mode" in all|check|test|build|vet|race|deps|cross) ;; *) echo 'unknown check mode' >&2; exit 64;; esac
+if [[ "${2:-}" != --inside ]]; then
+  exec systemd-run --user --wait --pipe --collect \
+    -p MemoryMax=4G -p MemoryHigh=3G -p MemorySwapMax=0 -p TasksMax=128 \
+    --working-directory="$repo_dir" \
+    /bin/bash "$repo_dir/scripts/check" "$mode" --inside
+fi
+cg_relative="$(sed -n 's/^0:://p' /proc/self/cgroup)"
+cg_dir="/sys/fs/cgroup${cg_relative}"
+cg_limit="$(<"$cg_dir/memory.max")"
+cg_swap="$(<"$cg_dir/memory.swap.max")"
+if [[ ! "$cg_limit" =~ ^[0-9]+$ ]] || (( cg_limit > 4294967296 )) || [[ "$cg_swap" != 0 ]]; then
+  echo 'ERROR: verified hard process-tree limit <=4 GiB and swap=0 required; no build started' >&2
+  exit 78
+fi
+printf 'verified cgroup=%s memory.max=%s memory.swap.max=%s; jobs=1\n' "$cg_relative" "$cg_limit" "$cg_swap"
+mkdir -p -- "$repo_dir/.cache"
+build_lock="$repo_dir/.cache/build.lock"
+if [[ -f "$repo_dir/../.build-safety/build.lock" ]]; then
+  build_lock="$repo_dir/../.build-safety/build.lock"
+fi
+exec 9>"$build_lock"
+flock --exclusive --nonblock 9 || { echo 'another workspace build holds the lock' >&2; exit 75; }
+export GOPATH="$repo_dir/.cache/go"
+export GOMODCACHE="$repo_dir/.cache/mod"
+export GOCACHE="$repo_dir/.cache/build"
+export GOFLAGS='-p=1'
+export GOMAXPROCS=1 GOMEMLIMIT=768MiB GOTOOLCHAIN=local CGO_ENABLED=0
+cd -- "$repo_dir"
+release_version="${NX_VERSION:-0.1.0-dev}"
+if [[ ! "$release_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][a-zA-Z0-9.-]+)?$ ]]; then
+  echo 'invalid NX_VERSION' >&2; exit 64
+fi
+build_target() {
+  local target="$1" arch="$2" variant="$3"
+  local output_dir="$repo_dir/dist/$target"
+  mkdir -p -- "$output_dir"
+  printf 'building %s\n' "$target"
+  # Reset architecture tuning for every target, including inherited environment.
+  export GOOS=linux GOARCH="$arch" GOARM=5 GOMIPS=softfloat GOMIPS64=softfloat
+  export GOAMD64=v1 GO386=softfloat GOPPC64=power8 GOARM64=v8.0
+  if [[ "$arch" == arm ]]; then export GOARM="$variant,softfloat"; fi
+  for command in nx-syncd nx-syncctl; do
+    go build -p=1 -trimpath -buildvcs=false \
+      -ldflags="-s -w -X nx-sync-server/internal/config.BuildTarget=$target -X nx-sync-server/internal/config.Version=$release_version" \
+      -o "$output_dir/$command" "./cmd/$command"
+  done
+  cp -- README.md LICENSE THIRD_PARTY_NOTICES.md CHANGELOG.md SECURITY.md CONTRIBUTING.md "$output_dir/"
+  cp -R -- third_party packaging docs "$output_dir/"
+  (cd -- "$output_dir"; sha256sum nx-syncd nx-syncctl > SHA256SUMS)
+  tar -C "$repo_dir/dist" -czf "$repo_dir/dist/nx-sync-server-$target.tar.gz" "$target"
+}
+case "$mode" in
+  deps) go mod tidy; go mod verify;;
+  test) go test -p=1 -parallel=1 ./...;;
+  vet) go vet -p=1 ./...;;
+  race) export CGO_ENABLED=1; go test -race -p=1 -parallel=1 ./...;;
+  build)
+    export GOOS=linux
+    native_arch="$(env -u GOARCH go env GOARCH)"; export GOARCH="$native_arch"
+    native_target="linux-$native_arch"
+    if [[ "$native_arch" == arm ]]; then native_target="linux-armv$(go env GOARM | cut -d, -f1)"; fi
+    mkdir -p bin
+    for command in nx-syncd nx-syncctl; do
+      go build -p=1 -trimpath -buildvcs=false \
+        -ldflags="-X nx-sync-server/internal/config.BuildTarget=$native_target -X nx-sync-server/internal/config.Version=$release_version" \
+        -o "bin/$command" "./cmd/$command"
+    done
+    ;;
+  cross) mkdir -p bin; GOARCH=arm64 go build -p=1 -trimpath -o bin/nx-syncd-linux-arm64 ./cmd/nx-syncd; GOARCH=arm64 go build -p=1 -trimpath -o bin/nx-syncctl-linux-arm64 ./cmd/nx-syncctl;;
+  all)
+    go mod verify
+    while read -r target arch variant; do
+      [[ -z "$target" || "$target" == \#* ]] && continue
+      build_target "$target" "$arch" "${variant:--}"
+    done < "$repo_dir/packaging/targets.txt"
+    # Corresponding source includes pinned non-system dependencies and notices.
+    rm -rf -- "$repo_dir/dist/source"
+    mkdir -p -- "$repo_dir/dist/source"
+    cp -R -- cmd internal scripts packaging docs third_party \
+      README.md LICENSE Makefile CONTRIBUTING.md SECURITY.md CHANGELOG.md \
+      THIRD_PARTY_NOTICES.md go.mod go.sum .gitignore "$repo_dir/dist/source/"
+    go mod vendor -o "$repo_dir/dist/source/vendor"
+    tar -C "$repo_dir/dist" -czf "$repo_dir/dist/nx-sync-server-source.tar.gz" source
+    (cd -- dist; sha256sum nx-sync-server-*.tar.gz > SHA256SUMS)
+    ;;
+  check) go mod verify; go test -p=1 -parallel=1 ./...; go vet -p=1 ./...;;
+esac
+printf 'peak bytes: '; cat "$cg_dir/memory.peak"

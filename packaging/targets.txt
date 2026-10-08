@@ -1,0 +1,16 @@
+# Target name        GOARCH    CPU variant (all binaries are static, CGO=0)
+linux-amd64          amd64     -
+linux-386            386       -
+linux-armv5          arm       5
+linux-armv6          arm       6
+linux-armv7          arm       7
+linux-arm64          arm64     -
+linux-mips           mips      softfloat
+linux-mipsle         mipsle    softfloat
+linux-mips64         mips64    softfloat
+linux-mips64le       mips64le  softfloat
+linux-ppc64          ppc64     -
+linux-ppc64le        ppc64le   -
+linux-riscv64        riscv64   -
+linux-s390x          s390x     -
+linux-loong64        loong64   -
