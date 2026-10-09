@@ -134,7 +134,7 @@ func (s *Store) PutControl(ctx context.Context, token string, c protocol.Control
 }
 
 // IssueCredential is SSH/local administration for an already signed member.
-// Native invitation enrollment will use the same durable membership checks.
+// Invitation enrollment uses the same durable membership checks.
 func (s *Store) IssueCredential(ctx context.Context, profile, device string) (Credential, error) {
 	if !protocol.ValidID(profile) || !protocol.ValidID(device) {
 		return Credential{}, ErrNotFound
@@ -192,29 +192,35 @@ func (s *Store) ReadControl(ctx context.Context, profile, generation, token stri
 }
 
 func (s *Store) Heads(ctx context.Context, profile, generation, token string) ([]protocol.Head, error) {
+	state, err := s.State(ctx, profile, generation, token)
+	return state.Heads, err
+}
+
+func (s *Store) State(ctx context.Context, profile, generation, token string) (protocol.State, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, err
+		return protocol.State{}, err
 	}
 	defer tx.Rollback()
 	a, err := authenticate(ctx, tx, profile, generation, token)
 	if err != nil {
-		return nil, err
+		return protocol.State{}, err
 	}
 	rows, err := tx.QueryContext(ctx, "SELECT device,revision,sequence,hash FROM envelopes WHERE profile=? AND key_epoch=? AND mode_epoch=? ORDER BY device", profile, a.keyEpoch, a.modeEpoch)
 	if err != nil {
-		return nil, err
+		return protocol.State{}, err
 	}
 	defer rows.Close()
 	heads := make([]protocol.Head, 0)
 	for rows.Next() {
 		var head protocol.Head
 		if err = rows.Scan(&head.DeviceID, &head.Revision, &head.Sequence, &head.Hash); err != nil {
-			return nil, err
+			return protocol.State{}, err
 		}
 		heads = append(heads, head)
 	}
-	return heads, rows.Err()
+	return protocol.State{ControlRevision: a.controlRevision, KeyEpoch: a.keyEpoch,
+		ModeEpoch: a.modeEpoch, CipherMode: a.mode, Heads: heads}, rows.Err()
 }
 
 func (s *Store) ReadEnvelope(ctx context.Context, profile, generation, token, device string) ([]byte, uint64, error) {
@@ -275,7 +281,7 @@ func (s *Store) ResetGeneration(ctx context.Context, expected, generation string
 	if current != expected {
 		return Identity{}, ErrGeneration
 	}
-	for _, table := range []string{"envelopes", "operations", "devices", "profiles"} {
+	for _, table := range []string{"invitations", "bootstrap_tickets", "envelopes", "operations", "devices", "profiles"} {
 		if _, err = tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
 			return Identity{}, err
 		}
@@ -296,7 +302,7 @@ func (s *Store) ResetGeneration(ctx context.Context, expected, generation string
 	return s.Identity(ctx)
 }
 
-// Backup creates a consistent schema-1 snapshot. Management keeps this in a
+// Backup creates a consistent snapshot. Management keeps this in a
 // root-only directory and never restores it over a database with newer writes.
 func (s *Store) Backup(ctx context.Context, path string) error {
 	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {

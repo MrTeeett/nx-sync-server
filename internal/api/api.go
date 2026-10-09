@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -15,16 +17,23 @@ import (
 )
 
 type Handler struct {
-	store  *store.Store
-	config config.Config
-	active chan struct{}
+	store     *store.Store
+	config    config.Config
+	active    chan struct{}
+	streams   chan struct{}
+	eventsHub eventHub
 }
 
 func New(s *store.Store, c config.Config) http.Handler {
-	h := &Handler{store: s, config: c, active: make(chan struct{}, c.MaxRequests)}
+	h := &Handler{store: s, config: c, active: make(chan struct{}, c.MaxRequests), streams: make(chan struct{}, c.MaxConnections/2)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", h.health)
+	mux.HandleFunc("POST /v1/bootstrap", h.bootstrap)
+	mux.HandleFunc("POST /v1/join", h.join)
+	mux.HandleFunc("POST /v1/profiles/{profile}/invitations", h.invite)
 	mux.HandleFunc("GET /v1/profiles/{profile}/heads", h.heads)
+	mux.HandleFunc("GET /v1/profiles/{profile}/state", h.state)
+	mux.HandleFunc("GET /v1/profiles/{profile}/events", h.events)
 	mux.HandleFunc("GET /v1/profiles/{profile}/envelopes/{device}", h.envelope)
 	mux.HandleFunc("PUT /v1/profiles/{profile}/envelopes/{device}", h.publish)
 	mux.HandleFunc("GET /v1/profiles/{profile}/control", h.control)
@@ -32,6 +41,11 @@ func New(s *store.Store, c config.Config) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
+		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/profiles/") && strings.HasSuffix(r.URL.Path, "/events") && strings.Count(r.URL.Path, "/") == 4 {
+			mux.ServeHTTP(w, r)
+			return
+		}
+
 		select {
 		case h.active <- struct{}{}:
 			defer func() { <-h.active }()
@@ -140,6 +154,33 @@ func (h *Handler) heads(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, heads)
 }
+
+func (h *Handler) state(w http.ResponseWriter, r *http.Request) {
+	profile, generation, token, err := auth(r)
+	if err != nil {
+		failure(w, err)
+		return
+	}
+	state, err := h.store.State(r.Context(), profile, generation, token)
+	if err != nil {
+		failure(w, err)
+		return
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		failure(w, err)
+		return
+	}
+	hash := sha256.Sum256(data)
+	etag := `"` + hex.EncodeToString(hash[:]) + `"`
+	w.Header().Set("ETag", etag)
+	if r.Header.Get("If-None-Match") == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(data)
+}
 func (h *Handler) envelope(w http.ResponseWriter, r *http.Request) {
 	profile, generation, token, err := auth(r)
 	if err != nil {
@@ -174,6 +215,7 @@ func (h *Handler) publish(w http.ResponseWriter, r *http.Request) {
 		failure(w, err)
 		return
 	}
+	h.eventsHub.changed(profile)
 	writeJSON(w, 200, receipt)
 }
 func (h *Handler) control(w http.ResponseWriter, r *http.Request) {
@@ -210,5 +252,6 @@ func (h *Handler) putControl(w http.ResponseWriter, r *http.Request) {
 		failure(w, err)
 		return
 	}
+	h.eventsHub.changed(profile)
 	writeJSON(w, 200, receipt)
 }

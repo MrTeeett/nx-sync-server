@@ -9,13 +9,14 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"nx-sync-server/internal/config"
-	"nx-sync-server/internal/fsutil"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"time"
+
+	"nx-sync-server/internal/config"
+	"nx-sync-server/internal/fsutil"
 )
 
 type Artifact struct {
@@ -40,44 +41,85 @@ type Signed struct {
 	Signature []byte `json:"signature"`
 }
 
+const UnsignedWarning = "WARNING: This package is unsigned. The installer author and authenticity cannot be verified. Running it as administrator may compromise your server. Continue only if you trust its source."
+
+type Verification struct {
+	Metadata Metadata
+	Signed   bool
+}
+
 func Domain(payload []byte) []byte { return append([]byte("NX-SYNC-RELEASE\x00v1\x00"), payload...) }
 
 func Verify(path, trustKey string, minSequence uint64, now time.Time) (Metadata, error) {
-	var result Metadata
-	var signed Signed
-	key, err := base64.StdEncoding.DecodeString(trustKey)
-	if err != nil || len(key) != ed25519.PublicKeySize {
-		return result, errors.New("trusted release public key required")
+	verified, err := Inspect(path, trustKey, minSequence, now, false)
+	return verified.Metadata, err
+}
+
+// Inspect permits an unsigned manifest only for an explicitly acknowledged
+// local operation. A present, invalid signature is never treated as unsigned.
+func Inspect(path, trustKey string, minSequence uint64, now time.Time, allowUnsigned bool) (Verification, error) {
+	var verified Verification
+	var document struct {
+		Payload   []byte          `json:"payload"`
+		Signature json.RawMessage `json:"signature"`
 	}
-	if err = fsutil.ReadJSON(path, &signed, 64<<10); err != nil {
-		return result, err
+	if err := fsutil.ReadJSON(path, &document, 64<<10); err != nil {
+		return verified, err
 	}
-	if len(signed.Payload) > 32<<10 || !ed25519.Verify(key, Domain(signed.Payload), signed.Signature) {
-		return result, errors.New("invalid release signature")
+	signed := Signed{Payload: document.Payload}
+	if len(document.Signature) != 0 && !bytes.Equal(document.Signature, []byte("null")) {
+		if document.Signature[0] != '"' {
+			return verified, errors.New("invalid release signature encoding")
+		}
+		if err := json.Unmarshal(document.Signature, &signed.Signature); err != nil {
+			return verified, err
+		}
 	}
-	if err = fsutil.DecodeJSON(bytes.NewReader(signed.Payload), &result); err != nil {
-		return result, err
+	if len(signed.Payload) == 0 || len(signed.Payload) > 32<<10 {
+		return verified, errors.New("invalid release payload size")
+	}
+	verified.Signed = len(signed.Signature) != 0
+	if verified.Signed {
+		key, err := base64.StdEncoding.DecodeString(trustKey)
+		if err != nil || len(key) != ed25519.PublicKeySize {
+			return verified, errors.New("trusted release public key required")
+		}
+		if !ed25519.Verify(key, Domain(signed.Payload), signed.Signature) {
+			return verified, errors.New("invalid release signature")
+		}
+	} else if !allowUnsigned {
+		return verified, errors.New(UnsignedWarning + " Pass --allow-unsigned to acknowledge this risk for this operation.")
+	}
+	result := &verified.Metadata
+	if err := fsutil.DecodeJSON(bytes.NewReader(signed.Payload), result); err != nil {
+		return verified, err
 	}
 	canonical, err := json.Marshal(result)
 	if err != nil || !bytes.Equal(canonical, signed.Payload) {
-		return result, errors.New("release payload must use canonical field order/encoding")
+		return verified, errors.New("release payload must use canonical field order/encoding")
 	}
 	expires, err := time.Parse(time.RFC3339, result.Expires)
 	if err != nil || !expires.After(now) || expires.After(now.Add(90*24*time.Hour)) {
-		return result, errors.New("expired or excessive release validity")
+		return verified, errors.New("expired or excessive release validity")
 	}
-	if result.Format != 1 || result.Sequence == 0 || result.Sequence <= minSequence || result.Channel != "stable" || result.OS != "linux" || result.Architecture != runtime.GOARCH || result.Target != config.Target() || result.Schema != 1 || !regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`).MatchString(result.Version) || len(result.Version) > 64 || len(result.Artifacts) != 2 {
-		return result, errors.New("incompatible or replayed release")
+	versionPattern := `^[0-9]+\.[0-9]+\.[0-9]+$`
+	channelOK := result.Channel == "stable"
+	if !verified.Signed {
+		versionPattern = `^[0-9]+\.[0-9]+\.[0-9]+([+-][a-zA-Z0-9.-]+)?$`
+		channelOK = channelOK || result.Channel == "dev"
+	}
+	if result.Format != 1 || result.Sequence == 0 || result.Sequence <= minSequence || !channelOK || result.OS != "linux" || result.Architecture != runtime.GOARCH || result.Target != config.Target() || result.Schema != 2 || !regexp.MustCompile(versionPattern).MatchString(result.Version) || len(result.Version) > 64 || len(result.Artifacts) != 2 {
+		return verified, errors.New("incompatible or replayed release")
 	}
 	seen := map[string]bool{}
 	for _, a := range result.Artifacts {
 		hash, err := hex.DecodeString(a.SHA256)
 		if (a.Name != "nx-syncd" && a.Name != "nx-syncctl") || seen[a.Name] || a.Size < 1 || a.Size > 128<<20 || err != nil || len(hash) != 32 {
-			return result, errors.New("invalid release artifact")
+			return verified, errors.New("invalid release artifact")
 		}
 		seen[a.Name] = true
 	}
-	return result, nil
+	return verified, nil
 }
 
 // Sign is an offline publisher operation. The installation helper never
@@ -90,7 +132,7 @@ func Sign(directory, version, target string, sequence uint64, expires time.Time,
 	if sequence == 0 || !expires.After(time.Now()) || expires.After(time.Now().Add(90*24*time.Hour)) || !regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`).MatchString(version) || len(key) != ed25519.PrivateKeySize {
 		return errors.New("invalid publisher metadata")
 	}
-	metadata := Metadata{Format: 1, Version: version, Sequence: sequence, Channel: "stable", OS: "linux", Architecture: arch, Target: target, Schema: 1, Expires: expires.UTC().Format(time.RFC3339)}
+	metadata := Metadata{Format: 1, Version: version, Sequence: sequence, Channel: "stable", OS: "linux", Architecture: arch, Target: target, Schema: 2, Expires: expires.UTC().Format(time.RFC3339)}
 	for _, name := range []string{"nx-syncd", "nx-syncctl"} {
 		path := filepath.Join(directory, name)
 		info, err := os.Lstat(path)

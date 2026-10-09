@@ -183,6 +183,16 @@ type Head struct {
 	Hash     string `json:"sha256"`
 }
 
+// State is the authenticated polling cursor. Control and envelope heads are
+// read from one transaction; each device retains its own processed cursor.
+type State struct {
+	ControlRevision uint64 `json:"control_revision,string"`
+	KeyEpoch        uint64 `json:"key_epoch,string"`
+	ModeEpoch       uint64 `json:"mode_epoch,string"`
+	CipherMode      string `json:"cipher_mode"`
+	Heads           []Head `json:"heads"`
+}
+
 type Health struct {
 	ProtocolVersion int    `json:"protocol_version"`
 	Status          string `json:"status"`

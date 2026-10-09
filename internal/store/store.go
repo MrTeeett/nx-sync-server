@@ -54,7 +54,7 @@ CREATE TABLE profiles (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, owner_key BL
 CREATE TABLE devices (profile TEXT NOT NULL REFERENCES profiles(id), id TEXT NOT NULL, public_key BLOB NOT NULL, role TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, token_hash BLOB UNIQUE, PRIMARY KEY(profile,id));
 CREATE TABLE envelopes (profile TEXT NOT NULL, device TEXT NOT NULL, revision INTEGER NOT NULL, sequence INTEGER NOT NULL, key_epoch INTEGER NOT NULL, mode_epoch INTEGER NOT NULL, size INTEGER NOT NULL, hash TEXT NOT NULL, data BLOB NOT NULL, PRIMARY KEY(profile,device), FOREIGN KEY(profile,device) REFERENCES devices(profile,id));
 CREATE TABLE operations (profile TEXT NOT NULL, actor TEXT NOT NULL, kind TEXT NOT NULL, id TEXT NOT NULL, digest BLOB NOT NULL, revision INTEGER NOT NULL, created INTEGER NOT NULL DEFAULT(unixepoch()), PRIMARY KEY(profile,actor,kind,id));
-`
+` + enrollmentSchema
 
 func connect(path string, limits Limits) (*Store, error) {
 	if !filepath.IsAbs(path) {
@@ -117,7 +117,7 @@ func Create(ctx context.Context, path string, limits Limits) (_ *Store, err erro
 	if err != nil {
 		return nil, err
 	}
-	if _, err = tx.ExecContext(ctx, "INSERT INTO metadata VALUES(1,1,?,?)", id, generation); err != nil {
+	if _, err = tx.ExecContext(ctx, "INSERT INTO metadata VALUES(1,2,?,?)", id, generation); err != nil {
 		return nil, err
 	}
 	if err = tx.Commit(); err != nil {
@@ -133,9 +133,13 @@ func Open(ctx context.Context, path string, limits Limits) (*Store, error) {
 	}
 	var version int
 	err = s.db.QueryRowContext(ctx, "SELECT schema_version FROM metadata WHERE id=1").Scan(&version)
-	if err != nil || version != 1 {
+	if err != nil || (version != 1 && version != 2) {
 		_ = s.Close()
 		return nil, errors.New("database is uninitialized or has unsupported schema")
+	}
+	if err = s.migrateEnrollment(ctx); err != nil {
+		_ = s.Close()
+		return nil, fmt.Errorf("migrate enrollment tables: %w", err)
 	}
 	return s, nil
 }
@@ -146,7 +150,7 @@ func (s *Store) Health(ctx context.Context) error {
 	if err := s.db.QueryRowContext(ctx, "SELECT schema_version FROM metadata WHERE id=1").Scan(&version); err != nil {
 		return err
 	}
-	if version != 1 {
+	if version != 2 {
 		return errors.New("unsupported schema")
 	}
 	return nil
@@ -319,7 +323,7 @@ func (s *Store) Publish(ctx context.Context, token string, e protocol.Envelope) 
 		return protocol.Receipt{}, ErrConflict
 	}
 	var total int64
-	if err = tx.QueryRowContext(ctx, "SELECT COALESCE(SUM(size),0) FROM envelopes WHERE profile=?", e.ProfileID).Scan(&total); err != nil {
+	if err = tx.QueryRowContext(ctx, "SELECT (SELECT COALESCE(SUM(size),0) FROM envelopes WHERE profile=?)+(SELECT COALESCE(SUM(length(box)),0) FROM invitations WHERE profile=?)", e.ProfileID, e.ProfileID).Scan(&total); err != nil {
 		return protocol.Receipt{}, err
 	}
 	if total-previousSize+int64(len(e.Payload)) > s.limits.ProfileBytes {

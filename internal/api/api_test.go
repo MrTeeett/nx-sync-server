@@ -58,6 +58,29 @@ func TestHTTPAuthSignedWriteAndBoundedHealth(t *testing.T) {
 		t.Fatalf("health: %d %s", w.Code, w.Body.String())
 	}
 	path := "/v1/profiles/" + credential.ProfileID + "/envelopes/" + credential.DeviceID
+	statePath := "/v1/profiles/" + credential.ProfileID + "/state"
+	w = request("GET", statePath, "", true)
+	stateETag := w.Header().Get("ETag")
+	if w.Code != 200 || stateETag == "" || !strings.Contains(w.Body.String(), `"control_revision":"1"`) {
+		t.Fatalf("state: %d %s", w.Code, w.Body.String())
+	}
+	conditional := func(authenticated bool) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("GET", statePath, nil)
+		r.Header.Set("If-None-Match", stateETag)
+		if authenticated {
+			r.Header.Set("Authorization", "Bearer "+credential.Token)
+			r.Header.Set("X-NX-Generation", credential.Generation)
+		}
+		response := httptest.NewRecorder()
+		h.ServeHTTP(response, r)
+		return response
+	}
+	if w = conditional(true); w.Code != 304 || w.Body.Len() != 0 {
+		t.Fatalf("unchanged state: %d", w.Code)
+	}
+	if w = conditional(false); w.Code != 401 {
+		t.Fatalf("conditional auth bypass: %d", w.Code)
+	}
 	if w = request("GET", path, "", false); w.Code != 401 {
 		t.Fatalf("unauthorized: %d", w.Code)
 	}
@@ -76,6 +99,9 @@ func TestHTTPAuthSignedWriteAndBoundedHealth(t *testing.T) {
 	}
 	if w = request("GET", path, "", true); w.Code != 200 || w.Header().Get("ETag") != `"1"` {
 		t.Fatalf("read: %d %s", w.Code, w.Body.String())
+	}
+	if w = conditional(true); w.Code != 200 || w.Header().Get("ETag") == stateETag {
+		t.Fatalf("published state cursor did not change: %d", w.Code)
 	}
 	if w = request("PUT", path, `{"unexpected":true}`, true); w.Code != 400 {
 		t.Fatalf("unknown fields: %d", w.Code)
