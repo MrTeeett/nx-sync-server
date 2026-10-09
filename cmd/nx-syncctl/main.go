@@ -9,6 +9,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -24,6 +25,7 @@ import (
 	"nx-sync-server/internal/release"
 	"nx-sync-server/internal/store"
 	"nx-sync-server/internal/tlsutil"
+	"nx-sync-server/internal/updates"
 )
 
 func main() {
@@ -40,7 +42,7 @@ func flags(name string) *flag.FlagSet { return flag.NewFlagSet(name, flag.Contin
 
 func run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("commands: version, init, ping, bootstrap, issue-credential, preflight, install, status, update, reset-db, uninstall, recover, release-keygen, sign-release")
+		return errors.New("commands: version, init, ping, connection-code, bootstrap, issue-credential, preflight, install, setup, status, update-preflight, update, update-settings, update-status, auto-update, rollback, reset-db, uninstall, recover, release-keygen, sign-release")
 	}
 	name := args[0]
 	args = args[1:]
@@ -70,6 +72,8 @@ func run(ctx context.Context, args []string) error {
 		return nil
 	case "bootstrap", "issue-credential":
 		return credential(ctx, name, args)
+	case "connection-code":
+		return connectionCode(ctx, args)
 	case "release-keygen", "sign-release":
 		return publisher(name, args)
 	case "status":
@@ -85,16 +89,55 @@ func run(ctx context.Context, args []string) error {
 			Operation            host.Operation `json:"operation"`
 			ExternalReachability string         `json:"external_reachability"`
 		}{man, op, "check_from_client"})
+	case "update-status":
+		if len(args) != 0 {
+			return errors.New("update-status takes no arguments")
+		}
+		policy, err := host.New().UpdatePolicy()
+		if err != nil {
+			return err
+		}
+		return output(policy)
 	}
 	if os.Geteuid() != 0 {
 		return errors.New("system administration requires root through a trusted local/SSH session")
 	}
 	manager := host.New()
 	switch name {
-	case "install", "preflight":
+	case "update-preflight":
 		f := flags(name)
-		bundle := f.String("bundle", "", "directory containing binaries and signed release.json")
+		bundle := f.String("bundle", "", "downloaded release directory")
+		channel := f.String("channel", "stable", "stable or dev")
+		unsigned := f.Bool("allow-unsigned", false, "acknowledge an unsigned package")
+		if err := f.Parse(args); err != nil {
+			return err
+		}
+		installed, operation, err := manager.Status()
+		if err != nil {
+			return err
+		}
+		if installed.State != "installed" || operation.Stage != "complete" {
+			return errors.New("recover the pending installation operation first")
+		}
+		verified, err := release.Inspect(filepath.Join(*bundle, "release.json"), installed.TrustKey, 0, time.Now(), *unsigned)
+		if err != nil {
+			return err
+		}
+		if verified.Metadata.Channel != *channel {
+			return errors.New("package does not match the selected channel")
+		}
+		if *channel == "stable" && updates.IsStableDowngrade(verified.Metadata.Version, installed.Version) {
+			return errors.New("stable release is older than the installed version; use explicit compatible rollback instead")
+		}
+		if err = release.CheckArtifacts(*bundle, verified.Metadata); err != nil {
+			return err
+		}
+		return output(map[string]any{"version": verified.Metadata.Version, "current_version": installed.Version, "channel": *channel, "unsigned": !verified.Signed, "update_available": verified.Metadata.Sequence > installed.HighestSequence})
+	case "install", "preflight", "setup":
+		f := flags(name)
+		bundle := f.String("bundle", "", "directory containing binaries and release.json")
 		trust := f.String("trust-key", "", "trusted Ed25519 public release key, base64")
+		unsigned := f.Bool("allow-unsigned", false, "acknowledge unsafe installation of an unsigned package for this operation")
 		tlsHost := f.String("tls-host", "", "IP/DNS name clients will use")
 		bind := f.String("bind", "0.0.0.0", "listen IP")
 		number := f.Int("port", 0, "TCP port; 0 selects a free port in 18443..18543")
@@ -102,10 +145,28 @@ func run(ctx context.Context, args []string) error {
 		block := f.Bool("block-web-ports", true, "prohibit ports 80 and 443")
 		zone := f.String("firewall-zone", "", "explicit ingress firewalld zone")
 		manual := f.Bool("allow-manual-firewall", false, "administrator explicitly manages unsupported ingress firewall")
+		channel := f.String("channel", "", "selected release channel: stable or dev")
+		auto := f.Bool("auto-update", false, "enable automatic server updates")
+		interval := f.Duration("update-interval", 24*time.Hour, "automatic update check interval (1h to 720h)")
 		if err := f.Parse(args); err != nil {
 			return err
 		}
-		o := host.InstallOptions{Bundle: *bundle, TrustKey: *trust, TLSHost: *tlsHost, Bind: *bind, Port: *number, MemoryBytes: *memory << 20, BlockWebPorts: *block, FirewallZone: *zone, AllowManualFirewall: *manual}
+		verified, err := release.Inspect(filepath.Join(*bundle, "release.json"), *trust, 0, time.Now(), *unsigned)
+		if err != nil {
+			return err
+		}
+		if !verified.Signed {
+			if _, err := fmt.Fprintln(os.Stderr, release.UnsignedWarning); err != nil {
+				return err
+			}
+		}
+		if *channel == "" {
+			*channel = verified.Metadata.Channel
+		}
+		if *channel != verified.Metadata.Channel || *interval < time.Hour || *interval > 30*24*time.Hour {
+			return errors.New("invalid selected channel or update interval")
+		}
+		o := host.InstallOptions{Bundle: *bundle, TrustKey: *trust, TLSHost: *tlsHost, Bind: *bind, Port: *number, MemoryBytes: *memory << 20, BlockWebPorts: *block, FirewallZone: *zone, AllowManualFirewall: *manual, AllowUnsigned: *unsigned}
 		if err := host.CheckSystem(o.MemoryBytes); err != nil {
 			return err
 		}
@@ -120,14 +181,115 @@ func run(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
+		if _, err = manager.ConfigureUpdates(ctx, host.UpdatePolicy{Enabled: *auto, Channel: *channel, IntervalSeconds: int64(*interval / time.Second), AllowUnsigned: *unsigned}); err != nil {
+			return err
+		}
+		if name == "setup" {
+			_, port, splitErr := net.SplitHostPort(man.Config.Listen)
+			if splitErr != nil {
+				return splitErr
+			}
+			origin := "https://" + net.JoinHostPort(*tlsHost, port)
+			code, expires, codeErr := newConnectionCode(ctx, "/etc/nx-syncd/config.json", origin)
+			if codeErr != nil {
+				return codeErr
+			}
+			return output(struct {
+				Installation   host.Manifest `json:"installation"`
+				ConnectionCode string        `json:"connection_code"`
+				Expires        int64         `json:"expires_at"`
+			}{man, code, expires})
+		}
 		return output(man)
 	case "update":
 		f := flags(name)
-		bundle := f.String("bundle", "", "directory containing a newer signed release")
+		bundle := f.String("bundle", "", "directory containing a newer release")
+		unsigned := f.Bool("allow-unsigned", false, "acknowledge unsafe installation of an unsigned update for this operation")
+		channel := f.String("channel", "", "GitHub release channel; stable is the default when --bundle is omitted")
+		rollback := f.Bool("rollback-on-failure", true, "restore compatible previous executables if the new daemon fails health checks")
+		ifNewer := f.Bool("if-newer", false, "succeed without changes when the downloaded release is already installed or older")
 		if err := f.Parse(args); err != nil {
 			return err
 		}
-		man, err := manager.Update(ctx, *bundle)
+		if *bundle == "" {
+			if *channel == "" {
+				*channel = "stable"
+			}
+			if *unsigned {
+				if _, err := fmt.Fprintln(os.Stderr, release.UnsignedWarning); err != nil {
+					return err
+				}
+			}
+			result, err := manager.UpdateOnline(ctx, *channel, *unsigned)
+			if err != nil {
+				return err
+			}
+			return output(result)
+		}
+		installed, _, err := manager.Status()
+		if err != nil {
+			return err
+		}
+		minimum := installed.HighestSequence
+		if *ifNewer {
+			minimum = 0
+		}
+		verified, err := release.Inspect(filepath.Join(*bundle, "release.json"), installed.TrustKey, minimum, time.Now(), *unsigned)
+		if err != nil {
+			return err
+		}
+		if *channel != "" && *channel != verified.Metadata.Channel {
+			return errors.New("downloaded package does not match the selected channel")
+		}
+		if *ifNewer && verified.Metadata.Sequence <= installed.HighestSequence {
+			if err = release.CheckArtifacts(*bundle, verified.Metadata); err != nil {
+				return err
+			}
+			return output(map[string]any{"updated": false, "installation": installed})
+		}
+		if !verified.Signed {
+			if _, err := fmt.Fprintln(os.Stderr, release.UnsignedWarning); err != nil {
+				return err
+			}
+		}
+		man, err := manager.UpdateWithOptions(ctx, host.UpdateOptions{Bundle: *bundle, AllowUnsigned: *unsigned, RollbackOnFailure: *rollback})
+		if err != nil {
+			return err
+		}
+		return output(man)
+	case "update-settings":
+		f := flags(name)
+		enabled := f.Bool("enabled", false, "enable automatic update checks")
+		channel := f.String("channel", "stable", "stable or dev; dev is never chosen implicitly")
+		interval := f.Duration("interval", 24*time.Hour, "check interval: 1h to 720h")
+		unsigned := f.Bool("allow-unsigned", false, "authorize future unsigned updates from this repository for this configured policy")
+		if err := f.Parse(args); err != nil {
+			return err
+		}
+		if *unsigned {
+			if _, err := fmt.Fprintln(os.Stderr, release.UnsignedWarning+" This policy also authorizes unattended unsigned updates while enabled."); err != nil {
+				return err
+			}
+		}
+		policy, err := manager.ConfigureUpdates(ctx, host.UpdatePolicy{Enabled: *enabled, Channel: *channel, IntervalSeconds: int64(*interval / time.Second), AllowUnsigned: *unsigned})
+		if err != nil {
+			return err
+		}
+		return output(policy)
+	case "auto-update":
+		if len(args) != 0 {
+			return errors.New("auto-update takes no arguments")
+		}
+		result, err := manager.AutoUpdate(ctx)
+		if err != nil {
+			return err
+		}
+		return output(result)
+	case "rollback":
+		if len(args) != 0 {
+			return errors.New("rollback takes no arguments")
+		}
+		man, err := manager.Rollback(ctx)
 		if err != nil {
 			return err
 		}

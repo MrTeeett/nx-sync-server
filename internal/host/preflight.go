@@ -5,11 +5,14 @@ import (
 	"errors"
 	"net"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"nx-sync-server/internal/port"
+	"nx-sync-server/internal/release"
 )
 
 func CheckSystem(memory int64) error {
@@ -55,11 +58,21 @@ type Preflight struct {
 	Firewall             string `json:"firewall"`
 	FinalBind            string `json:"final_bind"`
 	ExternalReachability string `json:"external_reachability"`
+	Unsigned             bool   `json:"unsigned"`
+	Version              string `json:"version"`
+	Channel              string `json:"channel"`
 }
 
 // Preflight is read-only. A preview listener is closed and is not a promise
 // that a later install can bind the same port.
 func (m *Manager) Preflight(ctx context.Context, o InstallOptions) (Preflight, error) {
+	verified, err := release.Inspect(filepath.Join(o.Bundle, "release.json"), o.TrustKey, 0, time.Now(), o.AllowUnsigned)
+	if err != nil {
+		return Preflight{}, err
+	}
+	if err = release.CheckArtifacts(o.Bundle, verified.Metadata); err != nil {
+		return Preflight{}, err
+	}
 	if err := m.checkFresh(ctx); err != nil {
 		return Preflight{}, err
 	}
@@ -73,5 +86,5 @@ func (m *Manager) Preflight(ctx context.Context, o InstallOptions) (Preflight, e
 	if err != nil {
 		return Preflight{}, err
 	}
-	return Preflight{Listen: address, Firewall: firewall, FinalBind: "systemd_socket_during_install", ExternalReachability: "check_from_client"}, nil
+	return Preflight{Listen: address, Firewall: firewall, FinalBind: "systemd_socket_during_install", ExternalReachability: "check_from_client", Unsigned: !verified.Signed, Version: verified.Metadata.Version, Channel: verified.Metadata.Channel}, nil
 }

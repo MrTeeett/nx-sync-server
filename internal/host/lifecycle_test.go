@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"nx-sync-server/internal/config"
+	"nx-sync-server/internal/fsutil"
 	"nx-sync-server/internal/probe"
 	"nx-sync-server/internal/release"
 	"nx-sync-server/internal/store"
@@ -26,6 +27,88 @@ type machine struct {
 	calls         []string
 	socket        net.Listener
 	failStartOnce bool
+}
+
+func unsignedManifest(t *testing.T, bundle string) {
+	t.Helper()
+	path := filepath.Join(bundle, "release.json")
+	var manifest release.Signed
+	if err := fsutil.ReadJSON(path, &manifest, 64<<10); err != nil {
+		t.Fatal(err)
+	}
+	manifest.Signature = nil
+	if err := fsutil.WriteJSON(path, manifest, 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUnsignedInstallAndUpdateRequireSeparateAcknowledgements(t *testing.T) {
+	m, fake, bundle, key, _ := management(t)
+	unsignedManifest(t, bundle)
+	ctx := context.Background()
+	options := InstallOptions{Bundle: bundle, TLSHost: "127.0.0.1", Bind: "127.0.0.1", BlockWebPorts: true}
+	if _, err := m.Preflight(ctx, options); err == nil {
+		t.Fatal("unsigned preflight accepted without warning acknowledgement")
+	}
+	if _, err := m.Install(ctx, options); err == nil {
+		t.Fatal("unsigned installation accepted without warning acknowledgement")
+	}
+	if _, err := os.Lstat(m.Layout.service()); !errors.Is(err, os.ErrNotExist) || fake.account {
+		t.Fatal("rejected installation created a service or account")
+	}
+	options.AllowUnsigned = true
+	preview, err := m.Preflight(ctx, options)
+	if err != nil || !preview.Unsigned {
+		t.Fatalf("unsigned preflight: %+v, %v", preview, err)
+	}
+	man, err := m.Install(ctx, options)
+	if err != nil || !man.Unsigned || man.TrustKey != "" || man.State != "installed" {
+		t.Fatalf("unsigned install without a key: %+v, %v", man, err)
+	}
+	if err := release.Sign(bundle, "0.1.1", config.Target(), 2, time.Now().Add(time.Hour), key); err != nil {
+		t.Fatal(err)
+	}
+	unsignedManifest(t, bundle)
+	before := len(fake.calls)
+	if _, err := m.Update(ctx, bundle); err == nil {
+		t.Fatal("unsigned installation silently authorized a later unsigned update")
+	}
+	if len(fake.calls) != before {
+		t.Fatal("unacknowledged update stopped or changed the installed service")
+	}
+	man, err = m.UpdateWithOptions(ctx, UpdateOptions{Bundle: bundle, AllowUnsigned: true})
+	if err != nil || !man.Unsigned || man.Sequence != 2 {
+		t.Fatalf("explicit unsigned update: %+v, %v", man, err)
+	}
+	stored, _, err := m.Status()
+	if err != nil || !stored.Unsigned || stored.TrustKey != "" {
+		t.Fatalf("unsigned installation status was not retained: %+v, %v", stored, err)
+	}
+}
+
+func TestUnsignedUpdateRetainsOriginalPublisherPin(t *testing.T) {
+	m, _, initial, key := installed(t)
+	bundle := t.TempDir()
+	for _, name := range []string{"nx-syncd", "nx-syncctl"} {
+		if err := os.WriteFile(filepath.Join(bundle, name), []byte("new synthetic binary"), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := release.Sign(bundle, "0.1.1", config.Target(), 2, time.Now().Add(time.Hour), key); err != nil {
+		t.Fatal(err)
+	}
+	unsignedManifest(t, bundle)
+	man, err := m.UpdateWithOptions(context.Background(), UpdateOptions{Bundle: bundle, AllowUnsigned: true})
+	if err != nil || !man.Unsigned || man.TrustKey != initial.TrustKey {
+		t.Fatalf("unsigned update changed pinned publisher: %+v, %v", man, err)
+	}
+	if err := release.Sign(bundle, "0.1.2", config.Target(), 3, time.Now().Add(time.Hour), key); err != nil {
+		t.Fatal(err)
+	}
+	man, err = m.Update(context.Background(), bundle)
+	if err != nil || man.Unsigned || man.TrustKey != initial.TrustKey {
+		t.Fatalf("return to publisher-verified updates failed: %+v, %v", man, err)
+	}
 }
 
 func (f *machine) Run(ctx context.Context, name string, args ...string) ([]byte, error) {

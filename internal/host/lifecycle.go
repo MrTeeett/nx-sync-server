@@ -22,6 +22,7 @@ import (
 	"nx-sync-server/internal/release"
 	"nx-sync-server/internal/store"
 	"nx-sync-server/internal/tlsutil"
+	"nx-sync-server/internal/updates"
 )
 
 // Layout roots only the component's fixed paths. Production always uses Root=/.
@@ -51,6 +52,9 @@ type Manifest struct {
 	Sequence            uint64            `json:"sequence,string"`
 	HighestSequence     uint64            `json:"highest_sequence,string"`
 	Version             string            `json:"version"`
+	Unsigned            bool              `json:"unsigned,omitempty"`
+	ReleaseMetadata     *release.Metadata `json:"release_metadata,omitempty"`
+	PreviousRelease     *PreviousRelease  `json:"previous_release,omitempty"`
 	AutoPort            bool              `json:"auto_port"`
 	FirewallZone        string            `json:"firewall_zone"`
 	AllowManualFirewall bool              `json:"allow_manual_firewall"`
@@ -70,9 +74,17 @@ type Operation struct {
 	Stage              string           `json:"stage"`
 	Bundle             string           `json:"bundle,omitempty"`
 	Release            release.Metadata `json:"release"`
+	Unsigned           bool             `json:"unsigned,omitempty"`
+	Previous           *PreviousRelease `json:"previous_release,omitempty"`
+	RollbackOnFailure  bool             `json:"rollback_on_failure,omitempty"`
 	Purge              bool             `json:"purge,omitempty"`
 	ExpectedGeneration string           `json:"expected_generation,omitempty"`
 	TargetGeneration   string           `json:"target_generation,omitempty"`
+}
+
+type PreviousRelease struct {
+	Metadata release.Metadata `json:"metadata"`
+	Unsigned bool             `json:"unsigned"`
 }
 
 type InstallOptions struct {
@@ -80,6 +92,14 @@ type InstallOptions struct {
 	Port                                          int
 	MemoryBytes                                   int64
 	BlockWebPorts, AllowManualFirewall            bool
+	AllowUnsigned                                 bool
+}
+
+type UpdateOptions struct {
+	Bundle            string
+	AllowUnsigned     bool
+	RollbackOnFailure bool
+	ExpectedPolicy    *UpdatePolicy
 }
 
 type Manager struct {
@@ -236,10 +256,11 @@ func (m *Manager) Install(ctx context.Context, o InstallOptions) (Manifest, erro
 	if provider == "manual" && !o.AllowManualFirewall {
 		return Manifest{}, errors.New("unsupported firewall: explicit manual ingress acknowledgement required before installation")
 	}
-	metadata, err := release.Verify(filepath.Join(o.Bundle, "release.json"), o.TrustKey, 0, time.Now())
+	verified, err := release.Inspect(filepath.Join(o.Bundle, "release.json"), o.TrustKey, 0, time.Now(), o.AllowUnsigned)
 	if err != nil {
 		return Manifest{}, err
 	}
+	metadata := verified.Metadata
 	if err = release.CheckArtifacts(o.Bundle, metadata); err != nil {
 		return Manifest{}, err
 	}
@@ -270,12 +291,12 @@ func (m *Manager) Install(ctx context.Context, o InstallOptions) (Manifest, erro
 	if err != nil {
 		return Manifest{}, err
 	}
-	man := Manifest{Format: 1, InstallationID: id, State: "installing", Config: c, TrustKey: o.TrustKey, Sequence: metadata.Sequence, HighestSequence: metadata.Sequence, Version: metadata.Version, AutoPort: o.Port == 0, FirewallZone: o.FirewallZone, AllowManualFirewall: o.AllowManualFirewall, UID: -1, GID: -1}
+	man := Manifest{Format: 1, InstallationID: id, State: "installing", Config: c, TrustKey: o.TrustKey, Sequence: metadata.Sequence, HighestSequence: metadata.Sequence, Version: metadata.Version, Unsigned: !verified.Signed, ReleaseMetadata: &metadata, AutoPort: o.Port == 0, FirewallZone: o.FirewallZone, AllowManualFirewall: o.AllowManualFirewall, UID: -1, GID: -1}
 	bundle, err := filepath.Abs(o.Bundle)
 	if err != nil {
 		return Manifest{}, err
 	}
-	op := Operation{Kind: "install", Stage: "prepared", Bundle: bundle, Release: metadata}
+	op := Operation{Kind: "install", Stage: "prepared", Bundle: bundle, Release: metadata, Unsigned: !verified.Signed}
 	if err = m.save(man); err != nil {
 		return man, err
 	}
@@ -560,6 +581,8 @@ func (m *Manager) Recover(ctx context.Context) (Manifest, error) {
 		return m.uninstall(ctx, man, op)
 	case "update":
 		return m.update(ctx, man, op)
+	case "rollback":
+		return m.rollback(ctx, man, op)
 	default:
 		return man, errors.New("unsupported pending operation")
 	}
@@ -663,6 +686,9 @@ func (m *Manager) Uninstall(ctx context.Context, purge bool) (Manifest, error) {
 }
 
 func (m *Manager) uninstall(ctx context.Context, man Manifest, op Operation) (Manifest, error) {
+	if err := m.removeUpdateUnits(ctx, man); err != nil {
+		return man, err
+	}
 	if err := m.stop(ctx, man); err != nil {
 		return man, err
 	}
@@ -715,6 +741,10 @@ func (m *Manager) uninstall(ctx context.Context, man Manifest, op Operation) (Ma
 }
 
 func (m *Manager) Update(ctx context.Context, bundle string) (Manifest, error) {
+	return m.UpdateWithOptions(ctx, UpdateOptions{Bundle: bundle})
+}
+
+func (m *Manager) UpdateWithOptions(ctx context.Context, o UpdateOptions) (Manifest, error) {
 	unlock, err := m.lock()
 	if err != nil {
 		return Manifest{}, err
@@ -724,31 +754,69 @@ func (m *Manager) Update(ctx context.Context, bundle string) (Manifest, error) {
 	if err != nil {
 		return man, err
 	}
-	metadata, err := release.Verify(filepath.Join(bundle, "release.json"), man.TrustKey, man.HighestSequence, time.Now())
+	if o.ExpectedPolicy != nil {
+		policy, policyErr := m.UpdatePolicy()
+		if policyErr != nil {
+			return man, policyErr
+		}
+		if !policy.Enabled || policy.Channel != o.ExpectedPolicy.Channel || policy.AllowUnsigned != o.ExpectedPolicy.AllowUnsigned {
+			return man, errors.New("automatic update policy changed; update cancelled")
+		}
+	}
+	verified, err := release.Inspect(filepath.Join(o.Bundle, "release.json"), man.TrustKey, man.HighestSequence, time.Now(), o.AllowUnsigned)
 	if err != nil {
 		return man, err
 	}
-	if err = release.CheckArtifacts(bundle, metadata); err != nil {
+	metadata := verified.Metadata
+	if metadata.Channel == "stable" && updates.IsStableDowngrade(metadata.Version, man.Version) {
+		return man, errors.New("stable updates cannot downgrade the installed version; use explicit compatible rollback instead")
+	}
+	if err = release.CheckArtifacts(o.Bundle, metadata); err != nil {
 		return man, err
 	}
-	bundle, err = filepath.Abs(bundle)
+	bundle, err := filepath.Abs(o.Bundle)
 	if err != nil {
 		return man, err
 	}
-	op := Operation{Kind: "update", Stage: "prepared", Bundle: bundle, Release: metadata}
+	var previous *PreviousRelease
+	if man.ReleaseMetadata != nil {
+		previous = &PreviousRelease{Metadata: *man.ReleaseMetadata, Unsigned: man.Unsigned}
+	}
+	op := Operation{Kind: "update", Stage: "prepared", Bundle: bundle, Release: metadata, Unsigned: !verified.Signed, Previous: previous, RollbackOnFailure: o.RollbackOnFailure}
 	if err = m.saveOperation(op); err != nil {
 		return man, err
 	}
 	return m.update(ctx, man, op)
 }
 
-func (m *Manager) update(ctx context.Context, man Manifest, op Operation) (Manifest, error) {
+func (m *Manager) update(ctx context.Context, man Manifest, op Operation) (result Manifest, updateErr error) {
+	stopped := false
+	activated := false
+	defer func() {
+		if updateErr == nil || !stopped || activated || op.Previous == nil || op.Previous.Metadata.Schema != 2 {
+			return
+		}
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 45*time.Second)
+		defer cancel()
+		if verifyErr := release.CheckArtifacts(m.Layout.binaryDir(op.Previous.Metadata.Sequence), op.Previous.Metadata); verifyErr != nil {
+			updateErr = errors.Join(updateErr, fmt.Errorf("verify previous executable: %w", verifyErr))
+			return
+		}
+		if restoreErr := m.link(op.Previous.Metadata.Sequence); restoreErr != nil {
+			updateErr = errors.Join(updateErr, fmt.Errorf("restore previous executable: %w", restoreErr))
+			return
+		}
+		if restartErr := m.start(cleanup, man); restartErr != nil {
+			updateErr = errors.Join(updateErr, fmt.Errorf("restart previous service: %w", restartErr))
+		}
+	}()
 	if op.Release.Sequence <= man.Sequence && op.Stage != "activated" {
 		return man, errors.New("update operation is inconsistent")
 	}
 	if err := m.stage(op.Bundle, op.Release); err != nil {
 		return man, err
 	}
+	stopped = true
 	if err := m.stop(ctx, man); err != nil {
 		return man, err
 	}
@@ -772,14 +840,18 @@ func (m *Manager) update(ctx context.Context, man Manifest, op Operation) (Manif
 	if closeErr != nil {
 		return man, closeErr
 	}
-	// Schema 1 is the only accepted schema. Keep the live database and its
+	// Enrollment schema migration is additive. Keep the live database and its
 	// durable revocations. Recovery never copies an old backup over new writes.
 	if err = m.link(op.Release.Sequence); err != nil {
 		return man, err
 	}
+	activated = true
 	man.Sequence = op.Release.Sequence
 	man.HighestSequence = op.Release.Sequence
 	man.Version = op.Release.Version
+	man.Unsigned = op.Unsigned
+	man.ReleaseMetadata = &op.Release
+	man.PreviousRelease = op.Previous
 	op.Stage = "activated"
 	if err = m.saveOperation(op); err != nil {
 		return man, err
@@ -788,6 +860,73 @@ func (m *Manager) update(ctx context.Context, man Manifest, op Operation) (Manif
 		return man, err
 	}
 	if err = m.start(ctx, man); err != nil {
+		if op.RollbackOnFailure && op.Previous != nil && op.Previous.Metadata.Schema == 2 {
+			rollback := Operation{Kind: "rollback", Stage: "prepared", Release: op.Previous.Metadata, Unsigned: op.Previous.Unsigned}
+			if journalErr := m.saveOperation(rollback); journalErr != nil {
+				return man, errors.Join(err, journalErr)
+			}
+			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 45*time.Second)
+			defer cancel()
+			restored, rollbackErr := m.rollback(cleanup, man, rollback)
+			if rollbackErr != nil {
+				return restored, errors.Join(err, fmt.Errorf("rollback failed: %w", rollbackErr))
+			}
+			return restored, fmt.Errorf("new release failed its health check; previous version restored: %w", err)
+		}
+		return man, err
+	}
+	op.Stage = "complete"
+	return man, m.saveOperation(op)
+}
+
+func (m *Manager) Rollback(ctx context.Context) (Manifest, error) {
+	unlock, err := m.lock()
+	if err != nil {
+		return Manifest{}, err
+	}
+	defer unlock()
+	man, err := m.checkIdle()
+	if err != nil {
+		return man, err
+	}
+	if man.PreviousRelease == nil || man.PreviousRelease.Metadata.Schema != 2 {
+		return man, errors.New("no retained release compatible with the live database; schema-1 downgrade is prohibited")
+	}
+	previous := man.PreviousRelease
+	op := Operation{Kind: "rollback", Stage: "prepared", Release: previous.Metadata, Unsigned: previous.Unsigned}
+	if err = release.CheckArtifacts(m.Layout.binaryDir(op.Release.Sequence), op.Release); err != nil {
+		return man, err
+	}
+	if err = m.saveOperation(op); err != nil {
+		return man, err
+	}
+	return m.rollback(ctx, man, op)
+}
+
+func (m *Manager) rollback(ctx context.Context, man Manifest, op Operation) (Manifest, error) {
+	if op.Release.Schema != 2 || op.Release.Sequence > man.HighestSequence {
+		return man, errors.New("rollback is incompatible with the live database or installation")
+	}
+	if err := release.CheckArtifacts(m.Layout.binaryDir(op.Release.Sequence), op.Release); err != nil {
+		return man, err
+	}
+	if err := m.stop(ctx, man); err != nil {
+		return man, err
+	}
+	// Restore only executables. Replacing SQLite with an earlier snapshot would
+	// discard settings and could resurrect revoked device credentials.
+	if err := m.link(op.Release.Sequence); err != nil {
+		return man, err
+	}
+	man.Sequence = op.Release.Sequence
+	man.Version = op.Release.Version
+	man.Unsigned = op.Unsigned
+	man.ReleaseMetadata = &op.Release
+	man.PreviousRelease = nil
+	if err := m.save(man); err != nil {
+		return man, err
+	}
+	if err := m.start(ctx, man); err != nil {
 		return man, err
 	}
 	op.Stage = "complete"
