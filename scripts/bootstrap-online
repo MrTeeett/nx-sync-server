@@ -1,0 +1,88 @@
+#!/bin/sh
+set -eu
+
+# This script is shipped with the clients, then executed through verified SSH.
+# It downloads data only; the client separately confirms running the installer.
+nx_boot_channel=${1:-stable}
+nx_boot_directory=${2:-}
+case "$nx_boot_channel" in stable|dev) ;; *) echo 'channel must be stable or dev' >&2; exit 64;; esac
+case "$nx_boot_directory" in /tmp/nx-sync-setup-*) ;; *) echo 'invalid download directory' >&2; exit 64;; esac
+nx_boot_suffix=${nx_boot_directory#/tmp/nx-sync-setup-}
+test "${#nx_boot_suffix}" -eq 32 || exit 64
+case "$nx_boot_suffix" in *[!0-9a-f]*) exit 64;; esac
+test -d "$nx_boot_directory" && test ! -L "$nx_boot_directory" || exit 64
+test "$(stat -c '%u:%a' "$nx_boot_directory")" = "$(id -u):700" || exit 77
+command -v tar >/dev/null && command -v gzip >/dev/null && command -v sha256sum >/dev/null || { echo 'VPS needs tar, gzip and sha256sum' >&2; exit 78; }
+umask 077
+
+nx_boot_machine=$(uname -m)
+case "$nx_boot_machine" in
+  x86_64|amd64) nx_boot_target=linux-amd64;;
+  i386|i486|i586|i686) nx_boot_target=linux-386;;
+  aarch64|arm64) nx_boot_target=linux-arm64;;
+  armv7l|armv8l) nx_boot_target=linux-armv7;;
+  armv6l) nx_boot_target=linux-armv6;;
+  armv5tel|armv5l) nx_boot_target=linux-armv5;;
+  mips*)
+    nx_boot_class=$(od -An -tu1 -j4 -N1 /bin/sh | tr -d ' ')
+    nx_boot_endian=$(od -An -tu1 -j5 -N1 /bin/sh | tr -d ' ')
+    case "$nx_boot_class:$nx_boot_endian" in
+      1:1) nx_boot_target=linux-mipsle;; 1:2) nx_boot_target=linux-mips;;
+      2:1) nx_boot_target=linux-mips64le;; 2:2) nx_boot_target=linux-mips64;;
+      *) echo 'unsupported MIPS ABI' >&2; exit 78;;
+    esac;;
+  ppc64|ppc64le|riscv64|s390x|loong64) nx_boot_target=linux-$nx_boot_machine;;
+  loongarch64) nx_boot_target=linux-loong64;;
+  *) echo "unsupported VPS architecture: $nx_boot_machine" >&2; exit 78;;
+esac
+
+nx_boot_base=https://github.com/MrTeeett/nx-sync-server/releases/latest/download
+if test "$nx_boot_channel" = dev; then nx_boot_base=https://github.com/MrTeeett/nx-sync-server/releases/download/dev; fi
+nx_boot_archive=nx-sync-server-$nx_boot_target.tar.gz
+nx_boot_fetch() (
+  # Bound disk use too, including servers returning no Content-Length.
+  ulimit -f 524288
+  if command -v curl >/dev/null; then
+    curl --fail --silent --show-error --location --max-redirs 5 \
+      --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 240 \
+      --max-filesize 268435456 --output "$2" "$1"
+  elif command -v wget >/dev/null; then
+    wget --quiet --https-only --max-redirect=5 --timeout=30 --tries=1 --output-document="$2" "$1"
+  else
+    echo 'VPS needs curl or wget for HTTPS downloads' >&2; exit 78
+  fi
+)
+
+cd -- "$nx_boot_directory"
+trap 'rm -f -- archive.download checksums.download members.download unpacked.download tar-error.download' EXIT
+nx_boot_fetch "$nx_boot_base/SHA256SUMS" checksums.download
+test "$(wc -c < checksums.download)" -le 65536 || exit 65
+nx_boot_checksum=$(awk -v name="$nx_boot_archive" '$2 == name || $2 == "*" name { print $1 }' checksums.download)
+test "${#nx_boot_checksum}" -eq 64 || { echo 'release has no unique architecture checksum; stable is never replaced by dev automatically' >&2; exit 65; }
+case "$nx_boot_checksum" in *[!0-9a-f]*) exit 65;; esac
+nx_boot_fetch "$nx_boot_base/$nx_boot_archive" archive.download
+test "$(wc -c < archive.download)" -le 268435456 || exit 65
+printf '%s  archive.download\n' "$nx_boot_checksum" | sha256sum --check --status
+
+# Bound decompression before tar sees the stream. A small compressed archive
+# must not be able to fill the VPS disk with a huge unselected member.
+(gzip -dc archive.download || : > tar-error.download) | head -c 335544321 > unpacked.download
+test ! -e tar-error.download && test "$(wc -c < unpacked.download)" -le 335544320 || exit 65
+(tar -tf unpacked.download || : > tar-error.download) | head -c 65537 > members.download
+test ! -e tar-error.download && test "$(wc -c < members.download)" -le 65536 || exit 65
+test "$(wc -l < members.download)" -le 512 || exit 65
+for nx_boot_name in nx-syncd nx-syncctl release.json; do
+  nx_boot_member=$nx_boot_target/$nx_boot_name
+  test "$(awk -v name="$nx_boot_member" '$0 == name { count++ } END { print count+0 }' members.download)" -eq 1 || exit 65
+  test ! -e "$nx_boot_name" && test ! -L "$nx_boot_name" || exit 65
+  # Extract to stdout and a fixed local filename. Archive paths, links and
+  # permission bits are never passed to a filesystem extraction operation.
+  nx_boot_limit=134217728
+  if test "$nx_boot_name" = release.json; then nx_boot_limit=65536; fi
+  (tar -xOf unpacked.download -- "$nx_boot_member" || : > tar-error.download) | head -c "$((nx_boot_limit+1))" > "$nx_boot_name"
+  test ! -e tar-error.download || exit 65
+  nx_boot_size=$(wc -c < "$nx_boot_name")
+  test "$nx_boot_size" -gt 0 && test "$nx_boot_size" -le "$nx_boot_limit" || exit 65
+done
+chmod 700 nx-syncctl nx-syncd
+printf '{"target":"%s","channel":"%s"}\n' "$nx_boot_target" "$nx_boot_channel"

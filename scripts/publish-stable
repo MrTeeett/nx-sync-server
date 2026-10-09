@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+: "${GITHUB_REPOSITORY:?}"
+: "${GH_TOKEN:?}"
+: "${NX_RELEASE_TAG:?}"
+[[ "$NX_RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 64
+repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd -- "$repo_dir/dist"
+sha256sum --check SHA256SUMS
+shopt -s nullglob
+assets=(nx-sync-server-linux-*.tar.gz nx-sync-server-source.tar.gz SHA256SUMS)
+expected_targets="$(awk '!/^#/ && NF { count++ } END { print count }' "$repo_dir/packaging/targets.txt")"
+(( ${#assets[@]} == expected_targets + 2 )) || exit 66
+notes_file="$(mktemp)"
+versions_file="$(mktemp)"
+trap 'rm -f -- "$notes_file" "$versions_file"' EXIT
+# Publishing a maintenance tag for an older version must not move the stable
+# download URL backwards. Dev releases never participate in this comparison.
+gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+  --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' > "$versions_file"
+latest_flag="$(python3 - "$NX_RELEASE_TAG" "$versions_file" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+def version(tag):
+    if len(tag) > 65 or not re.fullmatch(r"v?[0-9]+\.[0-9]+\.[0-9]+", tag):
+        return None
+    return tuple(map(int, tag.removeprefix("v").split(".")))
+
+selected = version(sys.argv[1])
+published = [version(tag) for tag in Path(sys.argv[2]).read_text().splitlines()]
+print("false" if any(item is not None and item > selected for item in published) else "true")
+PY
+)"
+cat > "$notes_file" <<EOF
+NX Sync Server ${NX_RELEASE_TAG#v}.
+
+Includes binaries for all Linux targets and corresponding vendored source.
+Tests, go vet, race checks and archive checksums passed in this workflow.
+
+Packages are currently unsigned. The installer warns before administrator
+execution; automatic unsigned updates require explicit policy authorization.
+EOF
+gh release create "$NX_RELEASE_TAG" "${assets[@]}" --repo "$GITHUB_REPOSITORY" \
+  --verify-tag --latest="$latest_flag" --title "NX Sync Server ${NX_RELEASE_TAG#v}" --notes-file "$notes_file"

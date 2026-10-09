@@ -41,8 +41,10 @@ documentation, licenses, and SHA-256 checksums. Module verification, tests,
 go vet, and race detector tests passed before this build was published.
 
 This rolling prerelease is updated after successful main builds. These are
-unsigned development archives; the signed install/update workflow requires
-stable release bundles signed by a trusted publisher.
+unsigned development archives. The SSH wizard warns that the installer author
+cannot be verified and lets you explicitly continue. Manual setup/update requires
+--allow-unsigned for each operation. Signed packages still require a trusted
+publisher key; an invalid signature is rejected.
 EOF
 
 title="Development build (${GITHUB_SHA:0:12})"

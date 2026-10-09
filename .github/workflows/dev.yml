@@ -3,6 +3,7 @@ name: Tests and development builds
 on:
   push:
     branches: ['**']
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -37,6 +38,17 @@ jobs:
           go-version: '1.26.x'
           check-latest: true
           cache: false
+
+      - name: Select release metadata
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          NX_RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$NX_RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo 'Stable release tags must be vX.Y.Z' >&2
+            exit 64
+          fi
+          printf 'NX_VERSION=%s\nNX_RELEASE_CHANNEL=stable\n' "${NX_RELEASE_TAG#v}" >> "$GITHUB_ENV"
 
       - name: Restore module and compiler caches
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -111,3 +123,28 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash scripts/publish-dev
+
+  publish-stable:
+    name: Publish a stable release
+    needs: checks-and-build
+    if: startsWith(github.ref, 'refs/tags/v') && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Check out the release helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Download verified build archives
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: nx-sync-server-${{ github.sha }}
+          path: dist
+      - name: Publish the tagged stable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NX_RELEASE_TAG: ${{ github.ref_name }}
+        run: bash scripts/publish-stable

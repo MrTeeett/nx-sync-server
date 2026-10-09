@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Run from a trusted SSH session with a bundle from a source you trust.
+# The helper performs installation and prints a short-lived connection code.
+if (( EUID != 0 )); then
+  echo 'Run with sudo from your own SSH session.' >&2
+  exit 77
+fi
+if (( $# == 0 )); then
+  echo 'Usage: setup --bundle DIR --tls-host HOST [--trust-key BASE64 | --allow-unsigned] [--port PORT] [--block-web-ports=false]' >&2
+  exit 64
+fi
+nx_setup_bundle=''
+nx_setup_unsigned=false
+nx_setup_args=("$@")
+while (( $# )); do
+  case "$1" in
+    --bundle) (( $# >= 2 )) || exit 64; nx_setup_bundle="$2"; shift 2 ;;
+    --bundle=*) nx_setup_bundle="${1#--bundle=}"; shift ;;
+    --allow-unsigned|--allow-unsigned=true) nx_setup_unsigned=true; shift ;;
+    *) shift ;;
+  esac
+done
+if [[ -z "$nx_setup_bundle" || ! -f "$nx_setup_bundle/release.json" || ! -x "$nx_setup_bundle/nx-syncctl" ]]; then
+  echo 'A release bundle with nx-syncctl and release.json is required.' >&2
+  exit 66
+fi
+if [[ "$nx_setup_unsigned" == true ]]; then
+  echo 'WARNING: This package is unsigned. The installer author and authenticity cannot be verified. Running it as administrator may compromise your server. Continue only if you trust its source.' >&2
+fi
+exec "$nx_setup_bundle/nx-syncctl" setup "${nx_setup_args[@]}"

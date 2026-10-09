@@ -7,6 +7,7 @@ if [[ "${2:-}" != --inside ]]; then
   exec systemd-run --user --wait --pipe --collect \
     -p MemoryMax=4G -p MemoryHigh=3G -p MemorySwapMax=0 -p TasksMax=128 \
     --setenv="PATH=$PATH" --setenv="NX_VERSION=${NX_VERSION:-0.1.0-dev}" \
+    --setenv="NX_RELEASE_CHANNEL=${NX_RELEASE_CHANNEL:-dev}" \
     --working-directory="$repo_dir" \
     /bin/bash "$repo_dir/scripts/check" "$mode" --inside
 fi
@@ -33,6 +34,7 @@ export GOFLAGS='-p=1'
 export GOMAXPROCS=1 GOMEMLIMIT=768MiB GOTOOLCHAIN=local CGO_ENABLED=0
 cd -- "$repo_dir"
 release_version="${NX_VERSION:-0.1.0-dev}"
+release_sequence="$(date +%s)"
 if [[ ! "$release_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][a-zA-Z0-9.-]+)?$ ]]; then
   echo 'invalid NX_VERSION' >&2; exit 64
 fi
@@ -52,7 +54,10 @@ build_target() {
   done
   cp -- README.md LICENSE THIRD_PARTY_NOTICES.md CHANGELOG.md SECURITY.md CONTRIBUTING.md "$output_dir/"
   cp -R -- third_party packaging docs "$output_dir/"
+  mkdir -p -- "$output_dir/scripts"
+  cp -- scripts/setup scripts/setup-online scripts/bootstrap-online scripts/package-client-bundle scripts/development-manifest "$output_dir/scripts/"
   (cd -- "$output_dir"; sha256sum nx-syncd nx-syncctl > SHA256SUMS)
+  python3 -B scripts/development-manifest "$output_dir" "$release_version" "$target" "$arch" "$release_sequence"
   tar -C "$repo_dir/dist" -czf "$repo_dir/dist/nx-sync-server-$target.tar.gz" "$target"
 }
 case "$mode" in
@@ -71,6 +76,7 @@ case "$mode" in
         -ldflags="-X nx-sync-server/internal/config.BuildTarget=$native_target -X nx-sync-server/internal/config.Version=$release_version" \
         -o "bin/$command" "./cmd/$command"
     done
+    python3 -B scripts/development-manifest bin "$release_version" "$native_target" "$native_arch" "$release_sequence"
     ;;
   cross) mkdir -p bin; GOARCH=arm64 go build -p=1 -trimpath -o bin/nx-syncd-linux-arm64 ./cmd/nx-syncd; GOARCH=arm64 go build -p=1 -trimpath -o bin/nx-syncctl-linux-arm64 ./cmd/nx-syncctl;;
   all)
@@ -82,7 +88,7 @@ case "$mode" in
     # Corresponding source includes pinned non-system dependencies and notices.
     rm -rf -- "$repo_dir/dist/source"
     mkdir -p -- "$repo_dir/dist/source"
-    cp -R -- cmd internal scripts packaging docs third_party \
+    cp -R -- cmd internal scripts packaging docs third_party tests \
       README.md LICENSE Makefile CONTRIBUTING.md SECURITY.md CHANGELOG.md \
       THIRD_PARTY_NOTICES.md go.mod go.sum .gitignore "$repo_dir/dist/source/"
     if [[ -d .github ]]; then cp -R -- .github "$repo_dir/dist/source/"; fi
@@ -90,6 +96,6 @@ case "$mode" in
     tar -C "$repo_dir/dist" -czf "$repo_dir/dist/nx-sync-server-source.tar.gz" source
     (cd -- dist; sha256sum nx-sync-server-*.tar.gz > SHA256SUMS)
     ;;
-  check) go mod verify; go test -p=1 -parallel=1 ./...; go vet -p=1 ./...;;
+  check) python3 -B -m unittest discover -s tests -p 'test_*.py'; go mod verify; go test -p=1 -parallel=1 ./...; go vet -p=1 ./...;;
 esac
 printf 'peak bytes: '; cat "$cg_dir/memory.peak"

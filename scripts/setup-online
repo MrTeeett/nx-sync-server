@@ -1,0 +1,31 @@
+#!/bin/sh
+set -eu
+test "$(id -u)" -eq 0 || { echo 'Run through your trusted SSH session with sudo.' >&2; exit 77; }
+nx_online_channel=stable
+nx_online_unsigned=false
+nx_online_expect_channel=false
+for nx_online_argument in "$@"; do
+  if test "$nx_online_expect_channel" = true; then
+    nx_online_channel=$nx_online_argument
+    nx_online_expect_channel=false
+    continue
+  fi
+  case "$nx_online_argument" in
+    --channel) nx_online_expect_channel=true;;
+    --channel=*) nx_online_channel=${nx_online_argument#--channel=};;
+    --allow-unsigned|--allow-unsigned=true) nx_online_unsigned=true;;
+  esac
+done
+test "$nx_online_expect_channel" = false || exit 64
+case "$nx_online_channel" in stable|dev) ;; *) exit 64;; esac
+if test "$nx_online_unsigned" = true; then
+  echo 'WARNING: The installer author and authenticity cannot be verified for unsigned releases. Continue only if you trust the GitHub source. Enabling automatic updates also authorizes future unsigned packages from this source.' >&2
+fi
+nx_online_id=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+nx_online_stage=/tmp/nx-sync-setup-$nx_online_id
+umask 077
+mkdir -- "$nx_online_stage"
+nx_online_script=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+trap 'rm -f -- "$nx_online_stage/nx-syncctl" "$nx_online_stage/nx-syncd" "$nx_online_stage/release.json"; rmdir -- "$nx_online_stage" 2>/dev/null || true' EXIT
+sh "$nx_online_script/bootstrap-online" "$nx_online_channel" "$nx_online_stage" >&2
+"$nx_online_stage/nx-syncctl" setup --bundle "$nx_online_stage" "$@"

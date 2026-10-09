@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+nx_package_script="$(readlink -f -- "${BASH_SOURCE[0]}")"
+if [[ "${1:-}" != --inside ]]; then
+  if (( $# != 2 )); then
+    echo 'Usage: package-client-bundle BUNDLE_DIRECTORY NEW_OUTPUT.zip' >&2
+    exit 64
+  fi
+  exec systemd-run --user --wait --pipe --collect \
+    -p MemoryMax=4G -p MemoryHigh=3G -p MemorySwapMax=0 -p TasksMax=128 \
+    --setenv="PATH=$PATH" --working-directory="$PWD" \
+    /bin/bash "$nx_package_script" --inside "$@"
+fi
+shift
+nx_package_cgroup="$(sed -n 's/^0:://p' /proc/self/cgroup)"
+nx_package_limit="$(<"/sys/fs/cgroup${nx_package_cgroup}/memory.max")"
+nx_package_swap="$(<"/sys/fs/cgroup${nx_package_cgroup}/memory.swap.max")"
+if [[ ! "$nx_package_limit" =~ ^[0-9]+$ ]] || (( nx_package_limit > 4294967296 )) || [[ "$nx_package_swap" != 0 ]]; then
+  echo 'Verified hard process-tree limit <=4 GiB and swap=0 required; no packaging started.' >&2
+  exit 78
+fi
+exec python3 -B - "$@" <<'PY'
+import base64
+import hashlib
+import json
+from pathlib import Path
+import sys
+import zipfile
+
+bundle, output = map(Path, sys.argv[1:])
+if bundle.is_symlink() or not bundle.is_dir():
+    raise SystemExit("Bundle must be a regular directory")
+names = ["nx-syncd", "nx-syncctl", "release.json", "LICENSE", "THIRD_PARTY_NOTICES.md", "README.md"]
+names += sorted(str(path.relative_to(bundle)) for path in (bundle/"third_party/licenses").glob("*.txt"))
+for name in names:
+    path = bundle/name
+    limit = 128*1024*1024 if name in names[:2] else 65536
+    if path.is_symlink() or not path.is_file() or not 0 < path.stat().st_size <= limit:
+        raise SystemExit("Missing or oversized bundle file: " + name)
+signed = json.loads((bundle/"release.json").read_text())
+metadata = json.loads(base64.b64decode(signed["payload"], validate=True))
+signature = signed.get("signature")
+if signature is not None and not isinstance(signature, str):
+    raise SystemExit("Invalid release signature encoding")
+signature = base64.b64decode(signature or "", validate=True)
+unsigned = len(signature) == 0
+if metadata.get("schema") != 2 or metadata.get("channel") not in (("stable", "dev") if unsigned else ("stable",)) or (signature and len(signature) != 64):
+    raise SystemExit("A compatible schema-2 release manifest is required")
+if unsigned:
+    print("WARNING: This package is unsigned. The installer author and authenticity cannot be verified. Running it as administrator may compromise your server. Continue only if you trust its source.", file=sys.stderr)
+artifacts = metadata["artifacts"]
+if len(artifacts) != 2 or {item["name"] for item in artifacts} != set(names[:2]):
+    raise SystemExit("Invalid manifest artifacts")
+for artifact in artifacts:
+    path = bundle/artifact["name"]
+    with path.open("rb") as source:
+        digest = hashlib.file_digest(source, "sha256").hexdigest()
+    if path.stat().st_size != artifact["size"] or digest != artifact["sha256"]:
+        raise SystemExit("Artifact does not match release metadata")
+# The wizard warns about unsigned bundles before executing anything on the VPS.
+# Present signatures are verified by the wizard and administration helper.
+complete = False
+with output.open("xb") as destination:
+    try:
+        with zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
+            for name in names:
+                archive.write(bundle/name, name)
+        complete = True
+    finally:
+        if not complete:
+            output.unlink(missing_ok=True)
+print("Client bundle: " + str(output))
+print("Distribute the matching complete source archive alongside this ZIP.")
+PY

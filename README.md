@@ -5,10 +5,13 @@ signed data in SQLite. `nx-syncctl` performs local administrative operations,
 including installation over SSH. Content encryption, profile owner keys, and
 settings merging remain on client devices.
 
-This is an initial protocol implementation. Android/Desktop UI integration,
-device invitations, a stable update channel, and PostgreSQL support require
-further implementation and validation. The HTTP API does not expose system
-management with root privileges.
+Android and Desktop integration is now implemented in the NX workspace:
+connection codes, owner-approved device invitations, encrypted merging,
+native preview, Ping, server change notifications and SSH setup screens.
+Client builds and tests on real devices/VPS remain required. GitHub release
+downloads and scheduled updates are implemented; PostgreSQL remains future work.
+The HTTP API does not expose
+system management with root privileges.
 
 ## License
 
@@ -21,9 +24,9 @@ are preserved in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and
 ## Building
 
 Requires Linux, Go 1.26+, GNU make, Bash, a systemd user manager, cgroup v2, `flock`,
-`tar`, and `sha256sum`. Builds run on a development machine. The resulting static
-binaries can be transferred to a server without Go, gcc, glibc, or a systemd user
-manager.
+`tar`, `sha256sum`, and Python 3.11+. Builds run on a development machine.
+The resulting static binaries can be transferred to a server without Go, gcc,
+glibc, or a systemd user manager.
 
 ```sh
 make build all       # both binaries for the full Linux build matrix
@@ -64,9 +67,15 @@ Versions use `0.1.0-dev.<commit>`; the release notes link to the commit and
 workflow run. Builds from other branches and pull requests publish artifacts
 without changing the dev release.
 
-These snapshots are unsigned development archives. The signed `install` and
-`update` workflow requires stable release bundles from a trusted publisher.
-The dev tag moves to the latest successfully published main commit.
+These snapshots are unsigned development archives with an unsigned `release.json`.
+The SSH wizard warns that the installer author cannot be verified and allows
+explicit continuation. Manual installation/update requires `--allow-unsigned`
+for each operation; no publisher key is needed for an unsigned package.
+Packages with a present, invalid signature are rejected.
+The dev tag moves to the latest successfully published main commit. Pushing a
+`vX.Y.Z` tag runs the same checks and publishes a stable release with that version.
+Only a successful build publishes assets. Publishing a stable release remains an
+explicit maintainer action; the installer never substitutes dev for missing stable.
 
 ## Installation platforms
 
@@ -136,10 +145,80 @@ and service units to start at boot.
 The management manifest and operation journal are stored separately from the
 synchronization database. Uninstallation preserves data by default; purging
 data requires an explicit flag. A database reset replaces the store generation
-and invalidates previous tokens. Updates accept a local bundle signed by the
-pinned key and verify metadata expiry, the release sequence number, and hashes
-of both binaries. A public update channel URL and project key will be added
-once the release process is established.
+and invalidates previous tokens. Updates download the selected channel directly
+from `MrTeeett/nx-sync-server` on the VPS, or accept a local bundle. Stable is the
+default; dev requires explicit selection. Signed packages use the installed
+publisher pin. Unsigned manual updates require `--allow-unsigned`; automatic
+unsigned updates require a separate explicit saved policy. Both paths check
+expiry, release sequence, CPU target, schema and binary hashes.
+
+Automatic updating is off by default. Its check interval defaults to 24 hours
+and can be set between 1 and 720 hours. An owned systemd timer runs a separate
+root helper with a 512 MiB hard memory limit; `nx-syncd` stays unprivileged.
+Updates preserve the port, TLS key, settings and existing firewall rules.
+Compatible prior executables are retained for `rollback` and restored if a new
+release fails its local health check. Rollback keeps the live database, including
+new settings and revoked credentials. Schema-1 executables cannot open a migrated
+schema-2 database, and legacy manifests without retained release metadata cannot
+provide rollback on their first upgrade. Protocol version 1 remains supported.
+
+## Connect Android and Desktop
+
+In NX, open **Settings transfer → Sync server**. Settings exchange starts off.
+
+1. For an installed server, generate a five-minute connection code through a
+   trusted SSH session:
+
+   ```sh
+   sudo /opt/nx-syncd/current/nx-syncctl connection-code \
+     --endpoint https://<public-IP-or-DNS>:18443 --out /root/nx-connection.txt
+   ```
+
+   Transfer that private file's code to the first app. Its owner, device,
+   encryption and recovery keys are generated locally; private keys are never
+   sent to the server. `--out -` explicitly returns a code in JSON for the
+   native SSH wizard. Keep codes out of logs and shared terminals.
+2. Select fields and directions. Review/apply the server's values, or explicitly
+   publish the selected local values, before enabling automatic sync.
+3. On the second app, create **this device's request**. Approve it using
+   **Add a device** on the main app, then enter its five-minute invitation on
+   the requesting app. The invitation includes an independent encryption key;
+   deliver it privately. Each device keeps its own writer key and token.
+4. Use **Ping** to check HTTPS identity/readiness and request time. Use preview
+   and a two-device edit to verify actual settings delivery.
+
+The foreground client maintains one authenticated HTTPS event stream (SSE).
+It carries only a changed-state cursor; clients fetch and authenticate encrypted
+envelopes separately. Healthy streams replace repeated foreground polling.
+Reconnect always compares current state, so a missed notification loses no
+committed settings. Android closes the stream when the app goes into the
+background and uses OS-scheduled jobs, with a minimum periodic interval of
+15 minutes and possible additional system delays. Failed streams use bounded
+reconnection/backoff and conditional state requests.
+
+For a fresh VPS, **Set up server over SSH** confirms the SSH host fingerprint
+and downloads the correct CPU archive on the VPS. Leave **Use development version**
+unchecked for stable; check it to use the rolling dev prerelease. The VPS needs
+`curl` or `wget`, `tar`, `gzip` and `sha256sum`, with trusted HTTPS CA certificates;
+no Go compiler is installed. A warning with **Cancel** / **Continue** explains
+unsigned installer execution. No local package directory or publisher-key field
+is required for the current unsigned releases. Invalid signatures remain rejected.
+The wizard previews the selected port/firewall and asks for Install.
+**Update sync server** opens SSH maintenance with the same channel selection,
+manual update, automatic update checkbox and check interval. Saving the automatic
+settings also requires authorization for future unsigned packages when enabled.
+Desktop's SSH wizard requires OpenSSH and
+currently supports a selected direct route. It stops while an app proxy is
+active; ordinary HTTPS sync follows the compatible selected proxy.
+The online command-line equivalent is [scripts/setup-online](scripts/setup-online).
+[scripts/setup](scripts/setup) remains available for trusted offline bundles.
+Installation and update instructions are in [docs/OPERATIONS.md](docs/OPERATIONS.md).
+
+**Forget this device's connection** clears only its local sync keys/cache.
+It retains app settings and server data and does not revoke server credentials.
+Forgetting the main device loses its local owner key and requires a new profile
+to restore management. Root-key rotation, revocation/authority-transfer screens,
+bot transport and network/resource application are not part of this client slice.
 
 ## Development
 
