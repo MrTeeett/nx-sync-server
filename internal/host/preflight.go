@@ -61,19 +61,28 @@ type Preflight struct {
 	Unsigned             bool   `json:"unsigned"`
 	Version              string `json:"version"`
 	Channel              string `json:"channel"`
+	// RetainedData means reinstallation preserves the existing data and TLS identity.
+	RetainedData bool `json:"retained_data,omitempty"`
 }
 
 // Preflight is read-only. A preview listener is closed and is not a promise
 // that a later install can bind the same port.
+// Completed owned removals are checked for safe reinstallation too.
 func (m *Manager) Preflight(ctx context.Context, o InstallOptions) (Preflight, error) {
-	verified, err := release.Inspect(filepath.Join(o.Bundle, "release.json"), o.TrustKey, 0, time.Now(), o.AllowUnsigned)
+	previous, o, err := m.installationTarget(ctx, o)
+	if err != nil {
+		return Preflight{}, err
+	}
+	var verified release.Verification
+	if previous != nil {
+		verified, err = inspectReinstallation(*previous, o)
+	} else {
+		verified, err = release.Inspect(filepath.Join(o.Bundle, "release.json"), o.TrustKey, 0, time.Now(), o.AllowUnsigned)
+	}
 	if err != nil {
 		return Preflight{}, err
 	}
 	if err = release.CheckArtifacts(o.Bundle, verified.Metadata); err != nil {
-		return Preflight{}, err
-	}
-	if err := m.checkFresh(ctx); err != nil {
 		return Preflight{}, err
 	}
 	l, err := port.Reserve(ctx, port.Policy{Host: o.Bind, Port: o.Port, BlockWebPorts: o.BlockWebPorts})
@@ -86,5 +95,5 @@ func (m *Manager) Preflight(ctx context.Context, o InstallOptions) (Preflight, e
 	if err != nil {
 		return Preflight{}, err
 	}
-	return Preflight{Listen: address, Firewall: firewall, FinalBind: "systemd_socket_during_install", ExternalReachability: "check_from_client", Unsigned: !verified.Signed, Version: verified.Metadata.Version, Channel: verified.Metadata.Channel}, nil
+	return Preflight{Listen: address, Firewall: firewall, FinalBind: "systemd_socket_during_install", ExternalReachability: "check_from_client", Unsigned: !verified.Signed, Version: verified.Metadata.Version, Channel: verified.Metadata.Channel, RetainedData: previous != nil && previous.State == "removed_data_retained"}, nil
 }

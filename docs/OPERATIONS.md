@@ -313,4 +313,21 @@ database by default. `--purge-data` also removes those data and own snapshots.
 A small root-owned audit manifest/journal and the service account remain;
 automatic account deletion could affect unrelated files using its numeric UID.
 An externally changed unit or firewall rule is left for manual review, with a
-pending cleanup status. Reinstallation over retained data is not yet automated.
+pending cleanup status. Finish or recover the owned uninstall before reinstalling.
+
+After a completed uninstall, run `preflight` and `install` or `setup` from a
+trusted compatible bundle. For retained data, use the original bind, TLS host,
+memory budget and web-port policy; omit the port or select its original value.
+Reinstallation preserves the database, device credentials, TLS identity and
+port. After `--purge-data`, it creates a new database and TLS identity, and
+devices need to be connected again. The recorded system account and audit
+history remain in both cases.
+
+Reinstallation accepts the exact recorded current release at the highest
+accepted sequence or a newer verified release. It preserves the publisher pin
+and highest accepted sequence, including
+after a rollback; older releases or changed artifacts at an accepted sequence
+are rejected. Explicit acknowledgement is still required for an unsigned bundle.
+Recreated installation paths, changed retained directories, foreign units or a
+changed system account stop preflight without replacing them. An interrupted
+reinstallation can be resumed with `recover` from the trusted bundle's helper.

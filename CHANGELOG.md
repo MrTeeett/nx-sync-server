@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Reinstallation after a completed owned uninstall: retained data keeps device
+  credentials and TLS identity; purged data gets a fresh identity. Ownership,
+  publisher trust, release anti-rollback checks and journal recovery remain enforced.
 - Direct GitHub downloads on the VPS, explicit stable/dev selection and native
   SSH update controls without selecting a local package or publisher key.
 - Opt-in systemd automatic updates with a configurable 1–720 hour interval,

@@ -80,6 +80,8 @@ type Operation struct {
 	Purge              bool             `json:"purge,omitempty"`
 	ExpectedGeneration string           `json:"expected_generation,omitempty"`
 	TargetGeneration   string           `json:"target_generation,omitempty"`
+	// Reinstallation records the replacement before changing a removed manifest.
+	Reinstallation *Manifest `json:"reinstallation,omitempty"`
 }
 
 type PreviousRelease struct {
@@ -237,17 +239,21 @@ func (m *Manager) checkFresh(ctx context.Context) error {
 	return nil
 }
 
+// Install creates a fresh installation or reinstalls a completed owned removal.
+// Retained data keeps its configuration, TLS identity and device credentials.
+// Pending operations and changed ownership must be resolved before installing.
 func (m *Manager) Install(ctx context.Context, o InstallOptions) (Manifest, error) {
 	unlock, err := m.lock()
 	if err != nil {
 		return Manifest{}, err
 	}
 	defer unlock()
-	if _, err = os.Lstat(m.Layout.manifest()); !errors.Is(err, os.ErrNotExist) {
-		return Manifest{}, errors.New("installation metadata exists; use status or recover")
-	}
-	if err = m.checkFresh(ctx); err != nil {
+	previous, o, err := m.installationTarget(ctx, o)
+	if err != nil {
 		return Manifest{}, err
+	}
+	if previous != nil {
+		return m.reinstall(ctx, *previous, o)
 	}
 	provider, err := DetectFirewall(ctx, m.Runner)
 	if err != nil {
@@ -559,6 +565,8 @@ func (m *Manager) Status() (Manifest, Operation, error) {
 	return man, op, err
 }
 
+// Recover resumes the recorded operation under the administration lock.
+// A completed operation is returned without starting another operation.
 func (m *Manager) Recover(ctx context.Context) (Manifest, error) {
 	unlock, err := m.lock()
 	if err != nil {
@@ -574,6 +582,18 @@ func (m *Manager) Recover(ctx context.Context) (Manifest, error) {
 	}
 	switch op.Kind {
 	case "install":
+		if op.Reinstallation != nil && (man.State == "removed_data_retained" || man.State == "purged") {
+			if err := m.checkRemoved(ctx, man); err != nil {
+				return man, err
+			}
+			if man.InstallationID != op.Reinstallation.InstallationID {
+				return man, errors.New("reinstallation journal belongs to a different installation")
+			}
+			man = *op.Reinstallation
+			if err := m.save(man); err != nil {
+				return man, err
+			}
+		}
 		return m.install(ctx, man, op)
 	case "reset":
 		return m.reset(ctx, man, op)
