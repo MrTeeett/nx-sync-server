@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""Check production history SQL without compiling Go or opening a real store."""
+from pathlib import Path
+import re
+import sqlite3
+import unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+
+def literal(path, name):
+    return re.search(r'const ' + name + r' = `([\s\S]*?)`', (ROOT / path).read_text())[1]
+
+class HistorySchema(unittest.TestCase):
+    def setUp(self):
+        self.db = sqlite3.connect(':memory:')
+        self.addCleanup(self.db.close)
+        self.db.execute('PRAGMA foreign_keys=ON')
+        self.db.executescript(literal('internal/store/store.go', 'schema')
+                             + literal('internal/store/enrollment.go', 'enrollmentSchema')
+                             + literal('internal/store/history.go', 'historySchema'))
+        self.db.execute("INSERT INTO profiles(id,owner_id,owner_key) VALUES('p','d',x'01')")
+        self.db.execute("INSERT INTO devices(profile,id,public_key,role,token_hash) VALUES('p','d',x'02','writer',x'03')")
+
+    def snapshot(self, phase, operation, size):
+        self.db.execute('INSERT INTO history_snapshots VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+                        ('p', 'c', 'd', phase, operation, phase+1, phase+1, 1, 1, size, 'hash', b'signed-manifest'))
+        self.db.execute('INSERT INTO history_parts VALUES(?,?,?,?,?,?)', ('p', 'c', 'd', phase, 0, b'ciphertext-'+operation.encode()))
+
+    def test_atomic_swap_cascades_parts_and_rollback_preserves_old_copy(self):
+        self.snapshot(0, 'old', 100)
+        self.db.commit()
+        self.db.execute('BEGIN IMMEDIATE')
+        self.snapshot(1, 'new', 200)
+        self.db.execute("DELETE FROM history_snapshots WHERE profile='p' AND phase=0")
+        self.db.execute("UPDATE history_snapshots SET phase=0 WHERE profile='p' AND phase=1")
+        self.db.rollback()
+        self.assertEqual([(b'ciphertext-old',)], self.db.execute('SELECT data FROM history_parts').fetchall())
+        self.snapshot(1, 'new', 200)
+        self.db.execute("DELETE FROM history_snapshots WHERE profile='p' AND phase=0")
+        self.db.execute("UPDATE history_snapshots SET phase=0 WHERE profile='p' AND phase=1")
+        self.db.commit()
+        self.assertEqual([(0, b'ciphertext-new')], self.db.execute('SELECT phase,data FROM history_parts').fetchall())
+
+    def test_quota_reserves_larger_snapshot_and_includes_other_payloads(self):
+        self.snapshot(0, 'old', 100)
+        self.snapshot(1, 'new', 200)
+        self.db.execute("INSERT INTO envelopes VALUES('p','d',1,1,1,1,10,'h',x'00')")
+        text = (ROOT / 'internal/store/history.go').read_text()
+        query = re.search(r'`(SELECT\s+\(SELECT COALESCE\(SUM\(size\)[\s\S]*?)`', text)[1]
+        self.assertEqual(210, self.db.execute(query, ('p', 'p', 'p')).fetchone()[0])
+
+    def test_control_clear_removes_committed_and_staged_parts_keeps_credentials(self):
+        self.snapshot(0, 'old', 100)
+        self.snapshot(1, 'new', 200)
+        text = (ROOT / 'internal/store/control.go').read_text()
+        query = re.search(r'`(DELETE FROM history_snapshots[\s\S]*?)`', text)[1]
+        self.db.execute(query, ('p', 'p', 1, 2, 'e2ee'))
+        self.assertEqual(0, self.db.execute('SELECT count(*) FROM history_snapshots').fetchone()[0])
+        self.assertEqual(0, self.db.execute('SELECT count(*) FROM history_parts').fetchone()[0])
+        self.assertEqual([(1, b'\x03')], self.db.execute('SELECT active,token_hash FROM devices').fetchall())
+
+    def test_orphan_parts_are_rejected_and_new_profiles_have_notification_counter(self):
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.db.execute("INSERT INTO history_parts VALUES('p','c','d',1,0,x'00')")
+        self.assertEqual(0, self.db.execute("SELECT history_revision FROM profiles WHERE id='p'").fetchone()[0])
+
+if __name__ == '__main__':
+    unittest.main()

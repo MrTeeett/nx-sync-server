@@ -27,7 +27,7 @@ func (s *Store) migrateEnrollment(ctx context.Context) error {
 	if err = tx.QueryRowContext(ctx, "SELECT schema_version FROM metadata WHERE id=1").Scan(&version); err != nil {
 		return err
 	}
-	if version == 2 {
+	if version == 2 || version == 3 {
 		return nil
 	}
 	if version != 1 {
@@ -194,8 +194,8 @@ func (s *Store) Invite(ctx context.Context, token string, i protocol.Invitation)
 	if count >= 128 {
 		return 0, ErrQuota
 	}
-	var used int64
-	if err = tx.QueryRowContext(ctx, "SELECT (SELECT COALESCE(SUM(size),0) FROM envelopes WHERE profile=?)+(SELECT COALESCE(SUM(length(box)),0) FROM invitations WHERE profile=?)", i.ProfileID, i.ProfileID).Scan(&used); err != nil {
+	used, err := profileUsage(ctx, tx, i.ProfileID)
+	if err != nil {
 		return 0, err
 	}
 	if used+int64(len(i.Box)) > s.limits.ProfileBytes {

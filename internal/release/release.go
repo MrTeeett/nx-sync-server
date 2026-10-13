@@ -108,7 +108,7 @@ func Inspect(path, trustKey string, minSequence uint64, now time.Time, allowUnsi
 		versionPattern = `^[0-9]+\.[0-9]+\.[0-9]+([+-][a-zA-Z0-9.-]+)?$`
 		channelOK = channelOK || result.Channel == "dev"
 	}
-	if result.Format != 1 || result.Sequence == 0 || result.Sequence <= minSequence || !channelOK || result.OS != "linux" || result.Architecture != runtime.GOARCH || result.Target != config.Target() || result.Schema != 2 || !regexp.MustCompile(versionPattern).MatchString(result.Version) || len(result.Version) > 64 || len(result.Artifacts) != 2 {
+	if result.Format != 1 || result.Sequence == 0 || result.Sequence <= minSequence || !channelOK || result.OS != "linux" || result.Architecture != runtime.GOARCH || result.Target != config.Target() || result.Schema != 3 || !regexp.MustCompile(versionPattern).MatchString(result.Version) || len(result.Version) > 64 || len(result.Artifacts) != 2 {
 		return verified, errors.New("incompatible or replayed release")
 	}
 	seen := map[string]bool{}
@@ -132,7 +132,7 @@ func Sign(directory, version, target string, sequence uint64, expires time.Time,
 	if sequence == 0 || !expires.After(time.Now()) || expires.After(time.Now().Add(90*24*time.Hour)) || !regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`).MatchString(version) || len(key) != ed25519.PrivateKeySize {
 		return errors.New("invalid publisher metadata")
 	}
-	metadata := Metadata{Format: 1, Version: version, Sequence: sequence, Channel: "stable", OS: "linux", Architecture: arch, Target: target, Schema: 2, Expires: expires.UTC().Format(time.RFC3339)}
+	metadata := Metadata{Format: 1, Version: version, Sequence: sequence, Channel: "stable", OS: "linux", Architecture: arch, Target: target, Schema: 3, Expires: expires.UTC().Format(time.RFC3339)}
 	for _, name := range []string{"nx-syncd", "nx-syncctl"} {
 		path := filepath.Join(directory, name)
 		info, err := os.Lstat(path)

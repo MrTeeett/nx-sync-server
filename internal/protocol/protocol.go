@@ -186,6 +186,7 @@ type Head struct {
 // State is the authenticated polling cursor. Control and envelope heads are
 // read from one transaction; each device retains its own processed cursor.
 type State struct {
+	HistoryRevision uint64 `json:"history_revision,string"`
 	ControlRevision uint64 `json:"control_revision,string"`
 	KeyEpoch        uint64 `json:"key_epoch,string"`
 	ModeEpoch       uint64 `json:"mode_epoch,string"`

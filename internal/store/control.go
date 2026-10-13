@@ -125,6 +125,9 @@ func (s *Store) PutControl(ctx context.Context, token string, c protocol.Control
 	// Removing a writer also removes its committed slot. Old epochs are never listed.
 	_, err = tx.ExecContext(ctx, `DELETE FROM envelopes WHERE profile=? AND (device NOT IN (SELECT id FROM devices WHERE profile=? AND active=1) OR key_epoch<>? OR mode_epoch<>?)`, c.ProfileID, c.ProfileID, c.KeyEpoch, c.ModeEpoch)
 	if err == nil {
+		_, err = tx.ExecContext(ctx, `DELETE FROM history_snapshots WHERE profile=? AND (device NOT IN (SELECT id FROM devices WHERE profile=? AND active=1) OR key_epoch<>? OR mode_epoch<>? OR ?<>'e2ee')`, c.ProfileID, c.ProfileID, c.KeyEpoch, c.ModeEpoch, c.CipherMode)
+	}
+	if err == nil {
 		err = record(ctx, tx, c.ProfileID, a.id, "control", c.OperationID, digest[:], revision)
 	}
 	if err == nil {
@@ -219,8 +222,18 @@ func (s *Store) State(ctx context.Context, profile, generation, token string) (p
 		}
 		heads = append(heads, head)
 	}
+	if err = rows.Err(); err != nil {
+		return protocol.State{}, err
+	}
+	if err = rows.Close(); err != nil {
+		return protocol.State{}, err
+	}
+	var historyRevision uint64
+	if err = tx.QueryRowContext(ctx, "SELECT history_revision FROM profiles WHERE id=?", profile).Scan(&historyRevision); err != nil {
+		return protocol.State{}, err
+	}
 	return protocol.State{ControlRevision: a.controlRevision, KeyEpoch: a.keyEpoch,
-		ModeEpoch: a.modeEpoch, CipherMode: a.mode, Heads: heads}, rows.Err()
+		ModeEpoch: a.modeEpoch, CipherMode: a.mode, Heads: heads, HistoryRevision: historyRevision}, nil
 }
 
 func (s *Store) ReadEnvelope(ctx context.Context, profile, generation, token, device string) ([]byte, uint64, error) {
@@ -281,7 +294,7 @@ func (s *Store) ResetGeneration(ctx context.Context, expected, generation string
 	if current != expected {
 		return Identity{}, ErrGeneration
 	}
-	for _, table := range []string{"invitations", "bootstrap_tickets", "envelopes", "operations", "devices", "profiles"} {
+	for _, table := range []string{"history_parts", "history_snapshots", "invitations", "bootstrap_tickets", "envelopes", "operations", "devices", "profiles"} {
 		if _, err = tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
 			return Identity{}, err
 		}

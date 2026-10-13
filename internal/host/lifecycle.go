@@ -813,7 +813,7 @@ func (m *Manager) update(ctx context.Context, man Manifest, op Operation) (resul
 	stopped := false
 	activated := false
 	defer func() {
-		if updateErr == nil || !stopped || activated || op.Previous == nil || op.Previous.Metadata.Schema != 2 {
+		if updateErr == nil || !stopped || activated || op.Previous == nil || op.Previous.Metadata.Schema != 3 {
 			return
 		}
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 45*time.Second)
@@ -880,7 +880,7 @@ func (m *Manager) update(ctx context.Context, man Manifest, op Operation) (resul
 		return man, err
 	}
 	if err = m.start(ctx, man); err != nil {
-		if op.RollbackOnFailure && op.Previous != nil && op.Previous.Metadata.Schema == 2 {
+		if op.RollbackOnFailure && op.Previous != nil && op.Previous.Metadata.Schema == 3 {
 			rollback := Operation{Kind: "rollback", Stage: "prepared", Release: op.Previous.Metadata, Unsigned: op.Previous.Unsigned}
 			if journalErr := m.saveOperation(rollback); journalErr != nil {
 				return man, errors.Join(err, journalErr)
@@ -909,7 +909,7 @@ func (m *Manager) Rollback(ctx context.Context) (Manifest, error) {
 	if err != nil {
 		return man, err
 	}
-	if man.PreviousRelease == nil || man.PreviousRelease.Metadata.Schema != 2 {
+	if man.PreviousRelease == nil || man.PreviousRelease.Metadata.Schema != 3 {
 		return man, errors.New("no retained release compatible with the live database; schema-1 downgrade is prohibited")
 	}
 	previous := man.PreviousRelease
@@ -924,7 +924,7 @@ func (m *Manager) Rollback(ctx context.Context) (Manifest, error) {
 }
 
 func (m *Manager) rollback(ctx context.Context, man Manifest, op Operation) (Manifest, error) {
-	if op.Release.Schema != 2 || op.Release.Sequence > man.HighestSequence {
+	if op.Release.Schema != 3 || op.Release.Sequence > man.HighestSequence {
 		return man, errors.New("rollback is incompatible with the live database or installation")
 	}
 	if err := release.CheckArtifacts(m.Layout.binaryDir(op.Release.Sequence), op.Release); err != nil {

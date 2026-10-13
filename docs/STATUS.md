@@ -60,3 +60,15 @@ Build and behavior validation results are recorded by the guarded tools and
 the workspace implementation plan. No actual VPS has been modified during
 development, no public release/key has been published, and no client acceptance
 task is marked complete merely because the Go server builds.
+
+### Deleted-message archive — 13 October 2026
+
+Task `deleted-inline-2026-10-13` is shared with the Android/Desktop implementation
+linked from [PROTOCOL.md](PROTOCOL.md#message-history-archives). Source changes add
+per-chat encrypted chunk staging/commit, membership/CAS checks, quota accounting,
+state hints and schema 1/2 → 3 migration. Release manifests declare schema 3;
+rollback to schema-2 executables over a migrated database is refused. Use the
+newly built helper for a schema-3 upgrade: old schema-2 helpers reject the bundle.
+No server build, Go test, deployment or client runtime acceptance was performed
+by the agent; the user owns all builds. Pure Python fixture and SQLite checks
+passed. Go protocol/store regression tests are added for the user's guarded checks.

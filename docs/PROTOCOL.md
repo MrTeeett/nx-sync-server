@@ -171,10 +171,89 @@ The new regression test has not been run with compilation: the user owns builds.
 Defaults: 1 MiB payload, 64 MiB payload quota/profile, 8 active members,
 64 connections, 16 active HTTP requests, 1024 total historical device IDs/profile.
 Control bodies are limited to 64 KiB;
-envelope body limits include base64 overhead. Payload quotas cover live slots and retained invitation boxes; metadata/tombstone disk use needs separate operational capacity planning.
+envelope body limits include base64 overhead. Payload quotas cover live slots, history reservations and retained invitation boxes; metadata/tombstone disk use needs separate operational capacity planning.
 The payload's `e2ee`/`plaintext` mode is owner-signed; the server treats the bytes
 as opaque and does not independently verify their encryption format.
 
 Error JSON contains only `code`: 401 unauthorized, 403 forbidden, 404 missing,
 409 revision/operation/epoch/generation conflict, 410 closed, 413 quota/body
 limit, 503 unavailable/overloaded. SQL/path/token details are not returned.
+
+## Message history archives
+
+Task `deleted-inline-2026-10-13` extends [Android](../../nx-android/.fork/docs/message-history.md)
+and [Desktop](../../nx-desktop/.fork/docs/message-history.md). Archives are server-only;
+the bot backend disables this capability. Clients explicitly authorize archive sync
+per account, upload separately by chat, and download only the currently displayed
+chat. Bookmarks/revisions and media file bytes are not uploaded. Local per-message
+removal/reset and quota pruning do not publish global deletion tombstones.
+
+All routes retain normal bearer/generation authentication and request concurrency,
+timeouts and JSON strictness. `chat` is an opaque 32-hex name generated on clients,
+never a Telegram chat ID. New routes:
+
+| Method | Route suffix after `/v1/profiles/{profile}` | Purpose |
+| --- | --- | --- |
+| GET | `/history/{chat}/heads` | Current committed writer heads in this chat, wrapped in `heads` |
+| GET/PUT | `/history/{chat}/{device}/manifest` | Read current signed manifest with revision ETag / begin staged upload |
+| GET/PUT | `/history/{chat}/{device}/{operation}/{part}` | Read committed ciphertext / idempotently stage an exact signed part |
+| POST | `/history/{chat}/{device}/commit` | Verify completeness and atomically replace the writer's chat snapshot |
+
+Part bodies/responses contain base64 `payload`. PUT returns `stored: true`.
+Part indices are canonical decimal route components, zero-based. GET requires the
+current committed operation and returns its revision ETag; replacement races cause
+404 and a fresh client cycle. Manifests are limited to 256 KiB and 1–1024 parts;
+each ciphertext is 40 bytes through the configured envelope limit (1 MiB maximum).
+Clients use at most 768 KiB plaintext per page and check hashes before decrypting.
+
+Manifest fields are `profile_id`, `device_id`, `generation`, `operation_id`,
+`chat_id`, string counters `expected_revision`, `sequence`, `key_epoch`, `mode_epoch`,
+`cipher_mode` (always `e2ee`), ordered `parts` (`size` string and 64-hex `sha256`),
+and base64 Ed25519 `signature`. Signing bytes are `NX-SYNC-HISTORY\0v1\0`, the
+five ID fields in the order listed, four uint64 counters in the order listed,
+`field(e2ee)`, uint32 part count, then each part's uint64 size and raw SHA-256.
+A head's SHA-256 authenticates these canonical signing bytes, excluding signature.
+The independent fixture is `internal/protocol/testdata/history-v1.json` and matches
+[the shared fixture](../../nx-shared/vectors/message-history-server.v1.json).
+
+Clients derive the opaque chat name as the first 16 bytes of HMAC-SHA256 using
+the profile root and `NX-HISTORY-CHAT\0v1\0`, `field(user_id decimal)`, one
+boolean environment byte and `field(canonical peer)`. Canonical peer strings are
+`user:<bare ID>`, `chat:<bare ID>`, `channel:<bare ID>`. Actual peer/account IDs,
+message IDs, sender, text and native media metadata appear only in ciphertext.
+The server can observe grouping, member identities, sizes and timing.
+
+History uses the existing client data cipher/context 1 with a separate AAD:
+`NX-SYNC-HISTORY-DATA\0v1\0`, the five manifest IDs, uint64 sequence, key epoch,
+mode epoch and zero-based part index. Pages are JSON version 1 with decimal-string
+`user_id`, boolean `test`, canonical `peer` and `records`: numeric `id`/`topic`,
+decimal-string `saved_at` and base64 network TL `payload`. Both current clients
+use layer 229. Android local attachment tails are stripped. Root keys, decryption
+and merging remain exclusively in clients; the daemon verifies signatures,
+authorization, epochs, counters, part sizes and hashes and stores opaque bytes.
+
+Beginning an upload requires a current writer signature, current epochs and CAS
+against that writer's committed chat revision with a greater sequence. Exactly
+one incomplete upload per writer/chat is retained; a fresh valid begin can replace
+an abandoned stage. Parts must match the signed manifest. Commit checks every
+part exists, swaps the complete snapshot and cascading parts in one transaction,
+and retains idempotent receipts under actor/kind `history:<opaque chat>`. A retry
+of a committed operation returns its original receipt without replacing a later
+snapshot. Closure/revocation/epoch advancement removes committed and staged data.
+The owner's cloud-clear mode-epoch update also clears archives and keeps device
+credentials. Clients pause archive authorization on the signed forward epoch.
+
+Schema 3 adds history tables and a monotonic profile `history_revision` to state
+ETags/SSE hints. It migrates schemas 1/2 additively. At most 4096 writer/chat slots
+exist per profile. Logical profile quota includes settings, invitations, manifests
+and the larger of committed/staged sizes per writer/chat; physical payload usage
+can reach twice that quota during replacements. Failed/unfinished uploads leave
+old committed data readable. A quota failure keeps the old snapshot and client
+archive; the server's configured quota remains an administrative limit.
+
+`internal/store/history_test.go` covers atomic staging/replacement, retry,
+tampering, chat isolation, quota inclusion, epoch clearing and restart. Go tests
+have not been compiled/run by the agent. `python3 -B scripts/check-history-schema`
+checks production SQLite constraints, swap/rollback, quota SQL and cascading
+clear without compiling code or touching a live store. Client runtime acceptance
+is still required after user builds.

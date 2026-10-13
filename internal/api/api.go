@@ -36,6 +36,12 @@ func New(s *store.Store, c config.Config) http.Handler {
 	mux.HandleFunc("GET /v1/profiles/{profile}/events", h.events)
 	mux.HandleFunc("GET /v1/profiles/{profile}/envelopes/{device}", h.envelope)
 	mux.HandleFunc("PUT /v1/profiles/{profile}/envelopes/{device}", h.publish)
+	mux.HandleFunc("GET /v1/profiles/{profile}/history/{chat}/heads", h.historyHeads)
+	mux.HandleFunc("GET /v1/profiles/{profile}/history/{chat}/{device}/manifest", h.historyManifest)
+	mux.HandleFunc("PUT /v1/profiles/{profile}/history/{chat}/{device}/manifest", h.historyWrite)
+	mux.HandleFunc("POST /v1/profiles/{profile}/history/{chat}/{device}/commit", h.historyWrite)
+	mux.HandleFunc("GET /v1/profiles/{profile}/history/{chat}/{device}/{operation}/{part}", h.historyPart)
+	mux.HandleFunc("PUT /v1/profiles/{profile}/history/{chat}/{device}/{operation}/{part}", h.historyPart)
 	mux.HandleFunc("GET /v1/profiles/{profile}/control", h.control)
 	mux.HandleFunc("PUT /v1/profiles/{profile}/control", h.putControl)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

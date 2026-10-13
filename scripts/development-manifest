@@ -40,7 +40,7 @@ def main():
         "os": "linux",
         "architecture": architecture,
         "target": target,
-        "schema": 2,
+        "schema": 3,
         "expires": (datetime.now(timezone.utc) + timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "artifacts": [],
     }

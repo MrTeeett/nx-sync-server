@@ -45,8 +45,8 @@ if signature is not None and not isinstance(signature, str):
     raise SystemExit("Invalid release signature encoding")
 signature = base64.b64decode(signature or "", validate=True)
 unsigned = len(signature) == 0
-if metadata.get("schema") != 2 or metadata.get("channel") not in (("stable", "dev") if unsigned else ("stable",)) or (signature and len(signature) != 64):
-    raise SystemExit("A compatible schema-2 release manifest is required")
+if metadata.get("schema") != 3 or metadata.get("channel") not in (("stable", "dev") if unsigned else ("stable",)) or (signature and len(signature) != 64):
+    raise SystemExit("A compatible schema-3 release manifest is required")
 if unsigned:
     print("WARNING: This package is unsigned. The installer author and authenticity cannot be verified. Running it as administrator may compromise your server. Continue only if you trust its source.", file=sys.stderr)
 artifacts = metadata["artifacts"]

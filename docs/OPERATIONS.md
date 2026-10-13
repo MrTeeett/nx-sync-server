@@ -331,3 +331,19 @@ are rejected. Explicit acknowledgement is still required for an unsigned bundle.
 Recreated installation paths, changed retained directories, foreign units or a
 changed system account stop preflight without replacing them. An interrupted
 reinstallation can be resumed with `recover` from the trusted bundle's helper.
+
+## Schema-3 history upgrade
+
+The current sources and release/package metadata now declare schema **3**.
+History tables and notification counters are added without removing enrolled
+profiles or credentials. Use a newly built verified schema-3 helper for the
+upgrade; a schema-2 helper will reject schema-3 bundles. A database migrated to
+3 cannot be opened by the old schema-2 daemon. Automated rollback/recovery accepts
+only schema-3 previous executables; restore an older backup only through the
+explicit existing reset/recovery procedure, accounting for newer writes.
+The historical schema-1 → 2 guidance above describes earlier releases.
+
+Profile payload quota includes encrypted message archives and staged reservations.
+See [PROTOCOL.md](PROTOCOL.md#message-history-archives) for the per-chat protocol,
+quota behavior and owner clear action. Build and deploy the new server before
+using client archive sync. The agent has not built, installed or restarted it.
