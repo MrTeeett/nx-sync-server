@@ -54,7 +54,7 @@ CREATE TABLE profiles (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, owner_key BL
 CREATE TABLE devices (profile TEXT NOT NULL REFERENCES profiles(id), id TEXT NOT NULL, public_key BLOB NOT NULL, role TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, token_hash BLOB UNIQUE, PRIMARY KEY(profile,id));
 CREATE TABLE envelopes (profile TEXT NOT NULL, device TEXT NOT NULL, revision INTEGER NOT NULL, sequence INTEGER NOT NULL, key_epoch INTEGER NOT NULL, mode_epoch INTEGER NOT NULL, size INTEGER NOT NULL, hash TEXT NOT NULL, data BLOB NOT NULL, PRIMARY KEY(profile,device), FOREIGN KEY(profile,device) REFERENCES devices(profile,id));
 CREATE TABLE operations (profile TEXT NOT NULL, actor TEXT NOT NULL, kind TEXT NOT NULL, id TEXT NOT NULL, digest BLOB NOT NULL, revision INTEGER NOT NULL, created INTEGER NOT NULL DEFAULT(unixepoch()), PRIMARY KEY(profile,actor,kind,id));
-` + enrollmentSchema + historySchema
+` + enrollmentSchema + historySchema + managementSchema
 
 func connect(path string, limits Limits) (*Store, error) {
 	if !filepath.IsAbs(path) {
@@ -109,6 +109,9 @@ func Create(ctx context.Context, path string, limits Limits) (_ *Store, err erro
 	if _, err = tx.ExecContext(ctx, schema); err != nil {
 		return nil, err
 	}
+	if _, err = tx.ExecContext(ctx, "INSERT INTO server_ownership(id) VALUES(1)"); err != nil {
+		return nil, err
+	}
 	id, err := protocol.NewID()
 	if err != nil {
 		return nil, err
@@ -144,6 +147,10 @@ func Open(ctx context.Context, path string, limits Limits) (*Store, error) {
 	if err = s.migrateHistory(ctx); err != nil {
 		_ = s.Close()
 		return nil, fmt.Errorf("migrate history tables: %w", err)
+	}
+	if err = s.migrateManagement(ctx); err != nil {
+		_ = s.Close()
+		return nil, fmt.Errorf("migrate server ownership: %w", err)
 	}
 	return s, nil
 }
@@ -208,6 +215,9 @@ func (s *Store) Bootstrap(ctx context.Context, deviceKey, ownerKey []byte) (Cred
 	if _, err = tx.ExecContext(ctx, "INSERT INTO devices(profile,id,public_key,role,token_hash) VALUES(?,?,?,'writer',?)", profile, device, deviceKey, hash); err != nil {
 		return result, err
 	}
+	if err = registerProfile(ctx, tx, profile); err != nil {
+		return result, err
+	}
 	if err = tx.Commit(); err != nil {
 		return result, err
 	}
@@ -240,6 +250,13 @@ func authenticate(ctx context.Context, tx *sql.Tx, profile, generation, token st
 	}
 	if err != nil {
 		return a, err
+	}
+	var admitted int
+	if err = tx.QueryRowContext(ctx, "SELECT admitted FROM profile_access WHERE profile=?", profile).Scan(&admitted); err != nil {
+		return a, err
+	}
+	if admitted != 1 {
+		return a, ErrRevoked
 	}
 	if closed != 0 {
 		return a, ErrClosed

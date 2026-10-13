@@ -42,7 +42,7 @@ func flags(name string) *flag.FlagSet { return flag.NewFlagSet(name, flag.Contin
 
 func run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("commands: version, init, ping, connection-code, bootstrap, issue-credential, preflight, install, setup, status, update-preflight, update, update-settings, update-status, auto-update, rollback, reset-db, uninstall, recover, release-keygen, sign-release")
+		return errors.New("commands: version, init, ping, connection-code, bootstrap, issue-credential, authorize-owner, assign-owner, preflight, install, setup, status, update-preflight, update, update-settings, update-status, auto-update, rollback, reset-db, uninstall, recover, release-keygen, sign-release")
 	}
 	name := args[0]
 	args = args[1:]
@@ -74,6 +74,76 @@ func run(ctx context.Context, args []string) error {
 		return credential(ctx, name, args)
 	case "connection-code":
 		return connectionCode(ctx, args)
+	case "authorize-owner":
+		if os.Geteuid() != 0 || len(args) != 0 {
+			return errors.New("owner authorization requires trusted local root access")
+		}
+		var proof struct {
+			ProfileID  string `json:"profile_id"`
+			Generation string `json:"generation"`
+			Token      string `json:"token"`
+		}
+		data, err := fsutil.ReadBounded(os.Stdin, 2048)
+		if err != nil {
+			return errors.New("invalid owner authorization")
+		}
+		if err = fsutil.DecodeJSON(strings.NewReader(string(data)), &proof); err != nil {
+			return errors.New("invalid owner authorization")
+		}
+		c, err := config.Load("/etc/nx-syncd/config.json")
+		if err != nil {
+			return err
+		}
+		s, err := store.Open(ctx, c.Database, store.Limits{EnvelopeBytes: c.MaxEnvelopeBytes, ProfileBytes: c.MaxProfileBytes, Devices: c.MaxDevices})
+		if err != nil {
+			return err
+		}
+		defer s.Close()
+		access, err := s.ServerAccess(ctx, proof.ProfileID, proof.Generation, proof.Token)
+		if err != nil {
+			return errors.New("server owner authorization required")
+		}
+		if access.MigrationRequired {
+			return output(struct {
+				Authorized        bool `json:"authorized"`
+				MigrationRequired bool `json:"migration_required"`
+			}{false, true})
+		}
+		if !access.Owner {
+			return errors.New("server owner authorization required")
+		}
+		return output(struct {
+			Authorized bool `json:"authorized"`
+		}{true})
+	case "assign-owner":
+		if os.Geteuid() != 0 {
+			return errors.New("owner migration requires root")
+		}
+		f := flags(name)
+		configPath := f.String("config", "/etc/nx-syncd/config.json", "existing configuration")
+		profile := f.String("profile", "", "existing profile selected by the trusted operator")
+		recoverOwner := f.Bool("recover", false, "explicitly replace an existing owner after loss of account access")
+		if err := f.Parse(args); err != nil {
+			return err
+		}
+		c, err := config.Load(*configPath)
+		if err != nil {
+			return err
+		}
+		s, err := store.Open(ctx, c.Database, store.Limits{EnvelopeBytes: c.MaxEnvelopeBytes, ProfileBytes: c.MaxProfileBytes, Devices: c.MaxDevices})
+		if err != nil {
+			return err
+		}
+		defer s.Close()
+		if *recoverOwner {
+			err = s.RecoverServerOwner(ctx, *profile)
+		} else {
+			err = s.AssignServerOwner(ctx, *profile)
+		}
+		if err != nil {
+			return err
+		}
+		return output(map[string]string{"owner_profile": *profile})
 	case "release-keygen", "sign-release":
 		return publisher(name, args)
 	case "status":

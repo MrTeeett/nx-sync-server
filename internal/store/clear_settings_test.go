@@ -40,8 +40,10 @@ func TestClearSettingsPreservesConnectionsAndRetryPreservesNewCopy(t *testing.T)
 	clear.ModeEpoch++
 	clear.OperationID = id(t)
 	clear.Signature = ed25519.Sign(f.ownerKey, clear.SigningBytes())
-	if _, err := f.s.PutControl(ctx, peer.Token, clear); !errors.Is(err, ErrForbidden) {
-		t.Fatalf("non-owner clear: %v", err)
+	withoutOwnerProof := clear
+	withoutOwnerProof.Signature = ed25519.Sign(peerKey, withoutOwnerProof.SigningBytes())
+	if _, err := f.s.PutControl(ctx, peer.Token, withoutOwnerProof); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("clear without account owner proof: %v", err)
 	}
 	before, err := f.s.State(ctx, control.ProfileID, control.Generation, f.credential.Token)
 	if err != nil || len(before.Heads) != 2 {

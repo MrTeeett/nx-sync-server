@@ -214,11 +214,14 @@ The online command-line equivalent is [scripts/setup-online](scripts/setup-onlin
 [scripts/setup](scripts/setup) remains available for trusted offline bundles.
 Installation and update instructions are in [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
-**Forget this device's connection** clears only its local sync keys/cache.
-It retains app settings and server data and does not revoke server credentials.
-Forgetting the main device loses its local owner key and requires a new profile
-to restore management. Root-key rotation, revocation/authority-transfer screens,
-bot transport and network/resource application are not part of this client slice.
+The first admitted account owns the installation on all its enrolled devices.
+Other accounts have isolated encrypted profiles and cannot administer the server.
+The owner can invite accounts, list their devices, and disconnect whole accounts;
+returning requires a fresh invitation. See [server management](docs/SERVER_MANAGEMENT.md).
+
+**Forget this device's connection** removes its local sync keys, saved SSH access,
+and cache. Server data and other enrolled devices remain available. Restore access
+from another trusted device of the same account, or use explicit local root recovery.
 
 ## Development
 

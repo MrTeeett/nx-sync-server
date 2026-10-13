@@ -24,7 +24,7 @@ func (s *Store) PutControl(ctx context.Context, token string, c protocol.Control
 	if authErr != nil && !errors.Is(authErr, ErrClosed) {
 		return protocol.Receipt{}, authErr
 	}
-	if a.id != a.ownerID || !ed25519.Verify(a.ownerKey, c.SigningBytes(), c.Signature) {
+	if !ed25519.Verify(a.ownerKey, c.SigningBytes(), c.Signature) {
 		return protocol.Receipt{}, ErrForbidden
 	}
 	digest := sha256.Sum256(c.SigningBytes())
@@ -294,10 +294,14 @@ func (s *Store) ResetGeneration(ctx context.Context, expected, generation string
 	if current != expected {
 		return Identity{}, ErrGeneration
 	}
-	for _, table := range []string{"history_parts", "history_snapshots", "invitations", "bootstrap_tickets", "envelopes", "operations", "devices", "profiles"} {
+	for _, table := range []string{"history_parts", "history_snapshots", "invitations", "account_invitations", "bootstrap_tickets", "envelopes", "operations", "server_administration", "device_info", "profile_access", "devices", "profiles"} {
 		if _, err = tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
 			return Identity{}, err
 		}
+	}
+	// Reset is explicit trusted administration; the next profile claims the new generation.
+	if _, err = tx.ExecContext(ctx, "UPDATE server_ownership SET owner_profile='',migration_pending=0,revision=0 WHERE id=1"); err != nil {
+		return Identity{}, err
 	}
 	if _, err = tx.ExecContext(ctx, "UPDATE metadata SET generation=? WHERE id=1", generation); err != nil {
 		return Identity{}, err

@@ -89,7 +89,7 @@ func (m *Manager) verifyUpdateUnits(p UpdatePolicy) error {
 	return verifyOwnedFile(m.updateTimerPath(), p.TimerHash, p.PreviousTimerHash)
 }
 
-func (m *Manager) ConfigureUpdates(ctx context.Context, next UpdatePolicy) (UpdatePolicy, error) {
+func (m *Manager) ConfigureUpdates(ctx context.Context, next UpdatePolicy) (result UpdatePolicy, resultErr error) {
 	unlock, err := m.lock()
 	if err != nil {
 		return UpdatePolicy{}, err
@@ -103,6 +103,21 @@ func (m *Manager) ConfigureUpdates(ctx context.Context, next UpdatePolicy) (Upda
 	if err != nil {
 		return previous, err
 	}
+	defer func() {
+		policy, readErr := m.UpdatePolicy()
+		state := "ready"
+		if readErr != nil {
+			policy = previous
+		}
+		if resultErr != nil || readErr != nil {
+			state = "error"
+		}
+		snapshot := config.ServerUpdates{Known: readErr == nil, Enabled: policy.Enabled, Channel: policy.Channel,
+			IntervalSeconds: policy.IntervalSeconds, Status: state, CheckedAt: time.Now().UTC().Format(time.RFC3339)}
+		if saveErr := fsutil.WriteJSON(filepath.Join(filepath.Dir(man.Config.Database), "server-status.json"), snapshot, 0644); saveErr != nil && resultErr == nil {
+			resultErr = fmt.Errorf("publish update status: %w", saveErr)
+		}
+	}()
 	if err = m.verifyUpdateUnits(previous); err != nil {
 		return previous, err
 	}

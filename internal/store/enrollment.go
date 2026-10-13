@@ -134,6 +134,9 @@ func (s *Store) ClaimBootstrap(ctx context.Context, c protocol.BootstrapClaim) (
 	if _, err = tx.ExecContext(ctx, "INSERT INTO devices(profile,id,public_key,role,token_hash) VALUES(?,?,?,'writer',?)", control.ProfileID, control.OwnerDeviceID, control.Members[0].PublicKey, tokenHash[:]); err != nil {
 		return Credential{}, err
 	}
+	if err = registerProfile(ctx, tx, control.ProfileID); err != nil {
+		return Credential{}, err
+	}
 	if _, err = tx.ExecContext(ctx, "UPDATE bootstrap_tickets SET digest=? WHERE hash=?", digest[:], hash[:]); err != nil {
 		return Credential{}, err
 	}
@@ -153,7 +156,7 @@ func (s *Store) Invite(ctx context.Context, token string, i protocol.Invitation)
 	if err != nil {
 		return 0, err
 	}
-	if a.id != a.ownerID || !ed25519.Verify(a.ownerKey, i.SigningBytes(), i.Signature) {
+	if !ed25519.Verify(a.ownerKey, i.SigningBytes(), i.Signature) {
 		return 0, ErrForbidden
 	}
 	digest := sha256.Sum256(i.SigningBytes())

@@ -44,6 +44,14 @@ func New(s *store.Store, c config.Config) http.Handler {
 	mux.HandleFunc("PUT /v1/profiles/{profile}/history/{chat}/{device}/{operation}/{part}", h.historyPart)
 	mux.HandleFunc("GET /v1/profiles/{profile}/control", h.control)
 	mux.HandleFunc("PUT /v1/profiles/{profile}/control", h.putControl)
+	mux.HandleFunc("GET /v1/profiles/{profile}/server", h.serverInfo)
+	mux.HandleFunc("POST /v1/profiles/{profile}/server/device", h.describeDevice)
+	mux.HandleFunc("GET /v1/profiles/{profile}/server/accounts", h.serverAccounts)
+	mux.HandleFunc("GET /v1/profiles/{profile}/server/accounts/{after}", h.serverAccounts)
+	mux.HandleFunc("POST /v1/profiles/{profile}/server/invitations", h.accountInvitation)
+	mux.HandleFunc("POST /v1/profiles/{profile}/server/revoke", h.revokeAccounts)
+	mux.HandleFunc("GET /v1/profiles/{profile}/server/administration", h.administration)
+	mux.HandleFunc("PUT /v1/profiles/{profile}/server/administration", h.putAdministration)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -83,6 +91,12 @@ func failure(w http.ResponseWriter, err error) {
 		status, code = 401, "unauthorized"
 	case errors.Is(err, store.ErrForbidden):
 		status, code = 403, "forbidden"
+	case errors.Is(err, store.ErrRevoked):
+		status, code = 403, "account_revoked"
+	case errors.Is(err, store.ErrOwnerUnassigned):
+		status, code = 409, "owner_migration_required"
+	case errors.Is(err, store.ErrInvitationExpired):
+		status, code = 409, "invitation_expired"
 	case errors.Is(err, store.ErrConflict):
 		status, code = 409, "revision_conflict"
 	case errors.Is(err, store.ErrReplay):

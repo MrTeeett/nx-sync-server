@@ -58,7 +58,8 @@ func profileUsage(ctx context.Context, tx *sql.Tx, profile string) (int64, error
 	err := tx.QueryRowContext(ctx, `SELECT
  (SELECT COALESCE(SUM(size),0) FROM envelopes WHERE profile=?)+
  (SELECT COALESCE(SUM(length(box)),0) FROM invitations WHERE profile=?)+
- (SELECT COALESCE(SUM(size),0) FROM (SELECT MAX(size) AS size FROM history_snapshots WHERE profile=? GROUP BY chat,device))`, profile, profile, profile).Scan(&used)
+ (SELECT COALESCE(SUM(size),0) FROM (SELECT MAX(size) AS size FROM history_snapshots WHERE profile=? GROUP BY chat,device))+
+ (SELECT COALESCE(SUM(length(data)),0) FROM server_administration WHERE profile=?)`, profile, profile, profile, profile).Scan(&used)
 	return used, err
 }
 
