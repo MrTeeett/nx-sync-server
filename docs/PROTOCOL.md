@@ -148,6 +148,26 @@ inactive IDs cannot be reused and their tokens are cleared. A closed profile
 accepts only the original closure receipt retry and owner closure reads.
 A reset changes generation, so stale tokens/writes fail before touching state.
 
+### Clear settings while retaining enrolled devices
+
+The owner can clear the profile's settings using the existing control PUT:
+keep the key epoch, E2EE mode, owner and members, and increase `mode_epoch`.
+Sign with the current owner key and use the current control revision for CAS.
+The control update removes preceding envelopes in the same transaction and
+retains active device credentials. A stale envelope cannot recreate the copy.
+Retry the exact signed operation after a lost response; its stored receipt is
+returned without clearing a new copy published afterwards.
+
+Updated [Desktop](../../nx-desktop/.fork/docs/settings-sync.md) and
+[Android](../../nx-android/.fork/docs/settings-sync.md) clients verify the signed
+forward epoch, reset only their synchronization cache and pause automatic work.
+Their local app settings and root/device keys remain intact. Explicitly sending
+or enabling automatic sync can start a new cloud copy. Older clients fail closed
+on the new mode epoch; their credentials remain valid for an updated client.
+`internal/store/clear_settings_test.go` covers deletion, surviving credentials
+across restart, stale writers, non-owner rejection and retry after a new copy.
+The new regression test has not been run with compilation: the user owns builds.
+
 Defaults: 1 MiB payload, 64 MiB payload quota/profile, 8 active members,
 64 connections, 16 active HTTP requests, 1024 total historical device IDs/profile.
 Control bodies are limited to 64 KiB;
