@@ -40,6 +40,18 @@ lowercase-hex `sha256`. One database transaction reads authorization, control
 metadata and current heads. The ETag is the quoted hex SHA-256 of its encoded
 JSON. Authorization runs before comparing `If-None-Match`, including for 304.
 
+`resume` names the requesting device using the authenticated credential, never
+a client-supplied device ID. Its `device_id` is that device and `head` is its
+committed head from the same transaction, or JSON null if it has not published.
+This lets a valid installation recover after losing its local checkpoint.
+Before adopting counters, the client must still verify current owner-signed
+membership, envelope ETag, writer signature, account, epochs, payload hash and
+authenticated decryption. A hint alone never authorizes a counter reset or a
+write. Recovery retains ordinary compare-and-swap, replay and revocation checks;
+the next envelope uses the recovered revision and a greater sequence and is
+signed by the device. Older clients ignore the additional field; clients can
+also recover through a verified own head from an older server's `heads` list.
+
 An event stream first sends the current cursor, then coalesces successful
 envelope/control writes into `event: changed` frames. Its only data is JSON
 `{"etag":"\"<64-hex-digest>\""}`. Subscribe-before-read closes the initial

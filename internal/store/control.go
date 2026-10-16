@@ -215,12 +215,16 @@ func (s *Store) State(ctx context.Context, profile, generation, token string) (p
 	}
 	defer rows.Close()
 	heads := make([]protocol.Head, 0)
+	resume := &protocol.Resume{DeviceID: a.id}
 	for rows.Next() {
 		var head protocol.Head
 		if err = rows.Scan(&head.DeviceID, &head.Revision, &head.Sequence, &head.Hash); err != nil {
 			return protocol.State{}, err
 		}
 		heads = append(heads, head)
+		if head.DeviceID == a.id {
+			resume.Head = &head
+		}
 	}
 	if err = rows.Err(); err != nil {
 		return protocol.State{}, err
@@ -233,7 +237,7 @@ func (s *Store) State(ctx context.Context, profile, generation, token string) (p
 		return protocol.State{}, err
 	}
 	return protocol.State{ControlRevision: a.controlRevision, KeyEpoch: a.keyEpoch,
-		ModeEpoch: a.modeEpoch, CipherMode: a.mode, Heads: heads, HistoryRevision: historyRevision}, nil
+		ModeEpoch: a.modeEpoch, CipherMode: a.mode, Heads: heads, Resume: resume, HistoryRevision: historyRevision}, nil
 }
 
 func (s *Store) ReadEnvelope(ctx context.Context, profile, generation, token, device string) ([]byte, uint64, error) {

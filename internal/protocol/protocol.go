@@ -183,15 +183,23 @@ type Head struct {
 	Hash     string `json:"sha256"`
 }
 
+// Resume identifies the authenticated device's committed slot, if one exists.
+// Clients verify its signed envelope before restoring their local counters.
+type Resume struct {
+	DeviceID string `json:"device_id"`
+	Head     *Head  `json:"head"`
+}
+
 // State is the authenticated polling cursor. Control and envelope heads are
 // read from one transaction; each device retains its own processed cursor.
 type State struct {
-	HistoryRevision uint64 `json:"history_revision,string"`
-	ControlRevision uint64 `json:"control_revision,string"`
-	KeyEpoch        uint64 `json:"key_epoch,string"`
-	ModeEpoch       uint64 `json:"mode_epoch,string"`
-	CipherMode      string `json:"cipher_mode"`
-	Heads           []Head `json:"heads"`
+	HistoryRevision uint64  `json:"history_revision,string"`
+	ControlRevision uint64  `json:"control_revision,string"`
+	KeyEpoch        uint64  `json:"key_epoch,string"`
+	ModeEpoch       uint64  `json:"mode_epoch,string"`
+	CipherMode      string  `json:"cipher_mode"`
+	Heads           []Head  `json:"heads"`
+	Resume          *Resume `json:"resume,omitempty"`
 }
 
 type Health struct {
